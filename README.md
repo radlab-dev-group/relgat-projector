@@ -21,7 +21,7 @@ pip install -e .
 
 Install directly from a Git repository (replace URL accordingly):
 ```bash
-pip install "git+[https://github.com/ORG/relgat-trainer.git#egg=relgat-trainer](https://github.com/ORG/relgat-trainer.git#egg=relgat-trainer)"
+pip install "git+[https://github.com/radlab-dev-group/relgat-llm.git#egg=relgat-llm](https://github.com/radlab-dev-group/relgat-llm.git#egg=relgat-llm)"
 ````
 
 After installation, a console entry point is available:
