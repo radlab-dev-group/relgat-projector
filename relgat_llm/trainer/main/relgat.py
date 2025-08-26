@@ -1,8 +1,7 @@
 APP_DESCRIPTION = """
 RelGATTrainer runner.
 
-This application uses dataset exported with plwordnet-milvus CLI
-(see repo: https://github.com/radlab-dev-group/radlab-plwordnet).
+This application uses dataset exported with plwordnet-milvus CLI.
 If you want to use this trainer, pleas build base dataset firstly:
 
 ---
@@ -171,14 +170,36 @@ def get_args() -> argparse.Namespace:
         default=None,
         help="If set, clips gradient norm to this value (default: None – no clipping)",
     )
-
     parser.add_argument(
         "--eval-every-n-steps",
         dest="eval_every_n_steps",
         type=int,
         default=None,
         help="If > 0: evaluation will be done every N training steps. "
-             "If not given, then evaluation will be done after each epoch.",
+        "If not given, then evaluation will be done after each epoch.",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        dest="early_stop_patience",
+        type=int,
+        default=None,
+        help="Number of evaluation steps without improvement "
+        "after which training stops (default: None – disabled)",
+    )
+    parser.add_argument(
+        "--seed",
+        dest="seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
+
+    # mixed precision
+    parser.add_argument(
+        "--use-amp",
+        dest="use_amp",
+        action="store_true",
+        help="Enable Automatic Mixed Precision (AMP) training",
     )
 
     # Saving model to dir
@@ -221,6 +242,15 @@ def get_args() -> argparse.Namespace:
         help="Device to use (cpu, cuda, cuda:0) - depends on machine",
     )
 
+    # Experimental features:
+    # mask edges types
+    parser.add_argument(
+        "--disable-edge-type-mask",
+        dest="disable_edge_type_mask",
+        action="store_true",
+        help="If set, the model will not mask edges by relation type",
+    )
+
     # Optional margin argument
     parser.add_argument("--margin", type=float, default=1.0)
 
@@ -249,6 +279,18 @@ def main() -> None:
         str(args.eval_every_n_steps).strip()
     ):
         args.eval_every_n_steps = int(args.eval_every_n_steps)
+        if args.save_every_n_steps is not None and args.save_every_n_steps:
+            if args.save_every_n_steps < args.eval_every_n_steps:
+                raise ValueError(
+                    "save_every_n_steps must be greater "
+                    "than or equal to eval_every_n_steps"
+                )
+            if args.save_every_n_steps % args.eval_every_n_steps != 0:
+                raise ValueError(
+                    "Saving can only occur after evaluation. The number of saving "
+                    "steps must be divisible by the number of evaluation "
+                    "steps with no remainder."
+                )
     else:
         args.eval_every_n_steps = None
 
