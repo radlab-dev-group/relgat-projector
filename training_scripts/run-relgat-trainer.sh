@@ -102,7 +102,7 @@ RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
 # --------------------  APPLICATION CALL
 # =============================================================================
 export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
-python3 ../relgat_llm/trainer/main/relgat.py \
+relgat-train \
   --warmup-steps="${WARMUP_STEPS}" \
   --lr="${LEARNING_RATE}" \
   --lr-decay="${LR_DECAY}" \

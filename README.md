@@ -5,6 +5,34 @@ relation-aware node representations from a knowledge graph. It consumes precompu
 node embeddings and relation triplets, and supports multi-head attention, 
 negative sampling, LR scheduling, checkpointing, and optional Weights & Biases logging.
 
+## Installation
+- Requirements: Python 3.9+, pip, and a PyTorch-compatible environment (CPU or CUDA).
+- Binary note: torch and torch-scatter must match your PyTorch/CUDA stack.
+
+Install from local source:
+```bash 
+pip install .
+```
+
+Editable/development install:
+```bash
+pip install -e .
+````
+
+Install directly from a Git repository (replace URL accordingly):
+```bash
+pip install "git+[https://github.com/ORG/relgat-trainer.git#egg=relgat-trainer](https://github.com/ORG/relgat-trainer.git#egg=relgat-trainer)"
+````
+
+After installation, a console entry point is available:
+```bash
+relgat-train --help
+```
+
+If you run into issues with torch-scatter (especially on GPU), install the 
+wheel matching your PyTorch/CUDA versions as per the project’s documentation.
+
+
 ## Highlights
 - Relational multi-head GAT layers
 - Flexible scorers (distmult, transe)
@@ -38,7 +66,7 @@ plwordnet-milvus
 Train a model with your prepared files:
 
 ```bash
-python relgat.py
+relgat-train
     --nodes-embeddings-path /path/to/nodes_embeddings.pt
     --relations-mapping /path/to/relations_mapping.json
     --relations-triplets /path/to/relations_triplets.tsv
