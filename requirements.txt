@@ -1,0 +1,11 @@
+numpy
+spacy
+wandb
+
+torch
+torchvision
+torch-scatter
+
+accelerate
+transformers
+sentence_transformers
