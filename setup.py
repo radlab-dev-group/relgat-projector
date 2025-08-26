@@ -12,9 +12,9 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",
-    url="",
-    author="",
-    author_email="",
+    url="https://github.com/radlab-dev-group/relgat-llm",
+    author="RadLab team",
+    author_email="pawel@radlab.dev",
     keywords=[
         "graph-neural-networks",
         "GNN",
