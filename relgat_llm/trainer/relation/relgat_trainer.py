@@ -192,13 +192,16 @@ class RelGATTrainer:
             collate_fn=lambda batch: batch,
         )
 
-        # Mapping lu from triples on compact indexes
-        src_list, dst_list, rel_list = zip(*mapped_edges)
-        self.edge_index = torch.tensor([src_list, dst_list], dtype=torch.long).to(
-            self.device
-        )
+        # Mapping lu from triples on compact indexe
+        train_src_list, train_dst_list, train_rel_list = zip(*self.train_edges)
+        self.edge_index = torch.tensor(
+            [train_src_list, train_dst_list], dtype=torch.long
+        ).to(self.device)
         self.edge_type = torch.tensor(
-            [self.rel2idx[r] if isinstance(r, str) else int(r) for r in rel_list],
+            [
+                self.rel2idx[r] if isinstance(r, str) else int(r)
+                for r in train_rel_list
+            ],
             dtype=torch.long,
         ).to(self.device)
         self.num_rel = len(self.rel2idx)
