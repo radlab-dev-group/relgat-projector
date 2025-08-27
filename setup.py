@@ -3,7 +3,9 @@ from setuptools import setup, find_packages
 
 ROOT = Path(__file__).parent
 readme_path = ROOT / "README.md"
-long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+long_description = (
+    readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+)
 
 setup(
     name="relgat-trainer",

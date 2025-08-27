@@ -88,11 +88,12 @@ EVAL_N_STEPS=1000
 # =============================================================================
 # --------------------  DATASET CONFIGURATION
 # =============================================================================
-DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset-identifiers"
+# This dataset have to prepared using the base embedder (the same as the used in application)
+DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset-identifiers/wtcsnxj9"
 # Available datasets:
 #  - FULL: dataset_20250824_full
 #  - SAMPLE: dataset_20250824_limit_1000
-DATASET_DIR="${DATASET_ROOT}/dataset_20250824_full"
+DATASET_DIR="${DATASET_ROOT}/dataset"
 LU_EMBEDDING="${DATASET_DIR}/lexical_units_embedding.pickle"
 RELS_MAPPING="${DATASET_DIR}/relation_to_idx.json"
 RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
