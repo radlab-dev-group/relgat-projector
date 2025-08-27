@@ -537,9 +537,7 @@ class RelGATTrainer:
                             self.best_ckpt_dir = (
                                 f"best_checkpoint_{self.global_step}"
                             )
-                            self._save_checkpoint(
-                                subdir=self.best_ckpt_dir, run_config=self.run_config
-                            )
+                            self._save_checkpoint(subdir=self.best_ckpt_dir)
                             self._prune_checkpoints()
 
                             # log saved checkpoint to w&b
