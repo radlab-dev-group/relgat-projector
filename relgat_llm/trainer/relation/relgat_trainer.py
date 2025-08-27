@@ -192,13 +192,16 @@ class RelGATTrainer:
             collate_fn=lambda batch: batch,
         )
 
-        # Mapping lu from triples on compact indexes
-        src_list, dst_list, rel_list = zip(*mapped_edges)
-        self.edge_index = torch.tensor([src_list, dst_list], dtype=torch.long).to(
-            self.device
-        )
+        # Mapping lu from triples on compact indexe
+        train_src_list, train_dst_list, train_rel_list = zip(*self.train_edges)
+        self.edge_index = torch.tensor(
+            [train_src_list, train_dst_list], dtype=torch.long
+        ).to(self.device)
         self.edge_type = torch.tensor(
-            [self.rel2idx[r] if isinstance(r, str) else int(r) for r in rel_list],
+            [
+                self.rel2idx[r] if isinstance(r, str) else int(r)
+                for r in train_rel_list
+            ],
             dtype=torch.long,
         ).to(self.device)
         self.num_rel = len(self.rel2idx)
@@ -537,9 +540,7 @@ class RelGATTrainer:
                             self.best_ckpt_dir = (
                                 f"best_checkpoint_{self.global_step}"
                             )
-                            self._save_checkpoint(
-                                subdir=self.best_ckpt_dir, run_config=self.run_config
-                            )
+                            self._save_checkpoint(subdir=self.best_ckpt_dir)
                             self._prune_checkpoints()
 
                             # log saved checkpoint to w&b
@@ -588,32 +589,41 @@ class RelGATTrainer:
             f"relgat_{self.scorer_type}"
             f"_ratio{int(self.run_config['train_ratio'] * 100)}"
         )
-        self._save_checkpoint(subdir=out_model_dir, run_config=self.run_config)
+        self._save_checkpoint(subdir=out_model_dir)
         print(f"\nTraining finished – model saved to: {out_model_dir}")
 
         # ----------------- ARTIFACT W&B -----------------
         # WanDBHandler.add_model(name=f"relgat-{self.scorer_type}", local_path="..")
         WanDBHandler.finish_wand()
 
-    def _save_checkpoint(
-        self, subdir: str, run_config: Optional[Dict[str, Any]] = None
-    ) -> str:
+    def _save_checkpoint(self, subdir: str) -> str:
         """
         Saves model state_dict into self.save_dir/subdir/OUT_MODEL_NAME
-        Returns saved file path.
+        Also save:
+            - run config
+            - relations mapping
+
+        Returns saved file (model) path.
         """
         out_dir = self.save_dir / subdir
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / ConstantsRelGATTrainer.Default.OUT_MODEL_NAME
         torch.save(self.model.state_dict(), out_path)
 
-        if run_config is not None and len(run_config):
-            out_cfg_path = (
-                out_dir / ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME
-            )
+        _files = [
+            (
+                ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME,
+                self.run_config,
+            ),
+            (
+                ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
+                self.rel2idx,
+            ),
+        ]
+        for f_name, json_data in _files:
+            out_cfg_path = out_dir / f_name
             with open(out_cfg_path, "w") as f:
-                f.write(json.dumps(run_config, indent=2, ensure_ascii=False))
-
+                f.write(json.dumps(json_data, indent=2, ensure_ascii=False))
         return str(out_path)
 
     def _prune_checkpoints(self) -> None:

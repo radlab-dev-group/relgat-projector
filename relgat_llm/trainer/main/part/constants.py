@@ -26,6 +26,7 @@ class ConstantsRelGATTrainer:
         OUT_MODEL_NAME = "relgat-model.pt"
         DEFAULT_TRAINER_OUT_DIR = "relgat-out"
         TRAINING_CONFIG_FILE_NAME = "training-config.json"
+        TRAINING_CONFIG_REL_TO_IDX = "relations-map.json"
 
     from plwordnet_ml.embedder.constants.wandb import WandbConfig as _WANDBConfig
 
