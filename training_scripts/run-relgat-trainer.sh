@@ -12,87 +12,108 @@ MAX_CHECKPOINTS=5
 # Ratio of training data
 TRAIN_EVAL_DATASET_RATIO="0.90"
 
-# Which architecture will be trained {small, medium}
-ARCHITECTURE="small"
-#
+# Which architecture will be trained {small, medium, large}
+ARCHITECTURE="-"
+
 # =============================================================================
 # =============================================================================
 # --------------------  TRAINING PARAMETERS
 # =============================================================================
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
+  EPOCHS=30
   BATCH_SIZE=512
+  NUM_NEG_TO_POS=8
+
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
-  NUM_OF_HEADS=4
-  EPOCHS=30
-  NUM_NEG_TO_POS=8
-  LEARNING_RATE=0.0005
+  NUM_OF_HEADS=8
+
+  LEARNING_RATE=0.0001
+
+  SAVE_N_STEPS=100
+  EVAL_N_STEPS=100
+  LOG_EVERY_N_STEPS=10
 elif [[ "${ARCHITECTURE}" == "medium" ]]
 then
-  BATCH_SIZE=256
-  GAT_OUT_DIM=256
-  NUM_OF_LAYERS=3
-  NUM_OF_HEADS=8
   EPOCHS=40
+  BATCH_SIZE=256
   NUM_NEG_TO_POS=16
-  LEARNING_RATE=0.00035
+
+  LEARNING_RATE=0.00005
+
+  GAT_OUT_DIM=128
+  NUM_OF_LAYERS=3
+  NUM_OF_HEADS=10
+
+  SAVE_N_STEPS=200
+  EVAL_N_STEPS=200
+  LOG_EVERY_N_STEPS=5
 elif [[ "${ARCHITECTURE}" == "large" ]]
 then
+  EPOCHS=50
   BATCH_SIZE=128
+  NUM_NEG_TO_POS=32
+
+  LEARNING_RATE=0.000025
+
   GAT_OUT_DIM=256
   NUM_OF_LAYERS=4
   NUM_OF_HEADS=12
-  EPOCHS=50
-  NUM_NEG_TO_POS=32
-  LEARNING_RATE=0.00015
+
+  SAVE_N_STEPS=400
+  EVAL_N_STEPS=400
+  LOG_EVERY_N_STEPS=5
 else
   echo "Supported architectures: [small, medium, large]"
   exit 1
 fi
+
 # =============================================================================
 # Scorer, one of: [distmult, transe]
 SCORER="distmult"
+
 # Dropout used while training (on embedder dimension)
 DROPOUT=0.3
+
 # Relation attention dropout
 DROPOUT_REL_ATT=0.0
-# Logging during training after each n steps
-LOG_EVERY_N_STEPS=10
+
 # Multiplicative factor applied to LR after warm‑up (default: 1.0 – no change)
 LR_DECAY=1.0
+
 # Learning rate scheduler, one of: [linear, cosine, constant]
 LR_SCHEDULER="linear"
+
 # Optional explicit warmup steps (comment out to auto-compute)
 # WARMUP_STEPS=500
 # weight decay (0.0 is default) - used in Adam optimizer
 WEIGHT_DECAY=0.0
+
 # If set, clips gradient norm to this value (default: None – no clipping)
 #GRADIENT_CLIPPING=5
+
 # Number of evaluation steps without improvement after which training stops
 EARLY_STOP_PATIENCE_STEPS=10
+
 # To enable Automatic Mixed Precision (AMP) training uncomment next line
 #USE_AMP=1
+
 # If set, the model will not mask edges by relation type - to use option
 # uncomment next line
 #DISABLE_EDGE_TYPES=1
+
 # Enable self-adversarial negative sampling instead of margin ranking loss
 #USE_SELF_ADV_NEG=1
 
-# =============================================================================
-# =============================================================================
-# --------------------  STORING/EVALUATE MODEL WHILE TRAINING
-# Output directory to store the model and checkpoints during training
-OUT_MODEL_DIR="relgat-models/relgat-${ARCHITECTURE}_$(date +%Y%m%d_%H%M%S)"
-# Save model every n steps
-SAVE_N_STEPS=300
-# Optional explicit eval steps, if not given, then eval will be done after each epoch
-EVAL_N_STEPS=300
-#
-# =============================================================================
+# =============================================================================#
 # =============================================================================
 # --------------------  DATASET CONFIGURATION
 # =============================================================================
+
+# Output directory to store the model and checkpoints during training
+OUT_MODEL_DIR="relgat-models/relgat-${ARCHITECTURE}_$(date +%Y%m%d_%H%M%S)"
+
 # This dataset have to prepared using the base embedder (the same as the used in application)
 DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset-identifiers/wtcsnxj9"
 # Available datasets:
@@ -107,8 +128,9 @@ RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
 # =============================================================================
 # --------------------  APPLICATION CALL
 # =============================================================================
-export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
-relgat-train \
+
+CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-train \
+  --architecture="${ARCHITECTURE}" \
   --lr="${LEARNING_RATE}" \
   --lr-decay="${LR_DECAY}" \
   --early-stop-patience="${EARLY_STOP_PATIENCE_STEPS}" \
