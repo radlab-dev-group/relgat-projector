@@ -16,6 +16,7 @@ class RelGATModel(nn.Module):
         gat_out_dim: int = 200,
         gat_heads: int = 4,
         dropout: float = 0.2,
+        relation_attn_dropout: float = 0.0,
         gat_num_layers: int = 1,
     ):
         super().__init__()
@@ -31,6 +32,7 @@ class RelGATModel(nn.Module):
                 num_rel=num_rel,
                 heads=gat_heads,
                 dropout=dropout,
+                relation_attn_dropout=relation_attn_dropout,
                 use_bias=True,
             )
             # No activation between layers
@@ -46,6 +48,7 @@ class RelGATModel(nn.Module):
                         num_rel=num_rel,
                         heads=gat_heads,
                         dropout=dropout,
+                        relation_attn_dropout=relation_attn_dropout,
                         use_bias=True,
                     )
                 )

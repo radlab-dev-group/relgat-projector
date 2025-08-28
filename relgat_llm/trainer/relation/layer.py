@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from typing import Optional
 from torch_scatter import scatter_add
 
 
@@ -89,6 +90,7 @@ class RelGATLayer(nn.Module):
         heads: int = 4,
         dropout: float = 0.2,
         use_bias: bool = True,
+        relation_attn_dropout: Optional[float] = None,
     ):
         super().__init__()
         self.in_dim = in_dim
@@ -96,6 +98,9 @@ class RelGATLayer(nn.Module):
         self.heads = heads
         self.num_rel = num_rel
         self.dropout = nn.Dropout(dropout)
+        self.rel_attn_drop = nn.Dropout(
+            p=relation_attn_dropout if relation_attn_dropout is not None else 0.0
+        )
 
         # Linear projection per head (shared across relations)
         self.proj = nn.ModuleList(
@@ -223,16 +228,43 @@ class RelGATLayer(nn.Module):
             e = F.leaky_relu(e, negative_slope=0.2)
             attn_scores.append(e)
 
-        # 3. Softmax over neighbours (per destination)
-        # Stack heads -> [heads, E]
-        attn = torch.stack(attn_scores, dim=0)  # [H, E]
-        # Apply softmax separately for each head
-        attn = torch.exp(attn)
-        # denominator: sum over incoming edges for each dst node, per head
-        denom = scatter_add(attn, dst, dim=1, dim_size=N)  # [H, N]
-        # avoid division by zero
-        denom = denom + 1e-16
-        attn = attn / denom[:, dst]  # normalized, [H, E]
+        # # 3. Softmax over neighbours (per destination)
+        # # Stack heads -> [heads, E]
+        # attn = torch.stack(attn_scores, dim=0)  # [H, E]
+        # # Apply softmax separately for each head
+        # attn = torch.exp(attn)
+        # # denominator: sum over incoming edges for each dst node, per head
+        # denom = scatter_add(attn, dst, dim=1, dim_size=N)  # [H, N]
+        # # avoid division by zero
+        # denom = denom + 1e-16
+        # attn = attn / denom[:, dst]  # normalized, [H, E]
+
+        # 3. Stable softmax over neighbours (per destination)
+        # Instead of using exp directly,
+        # we subtract the per-dst maximum to stabilize the softmax.
+        H = self.heads
+        eps = 1e-16
+        attn = []
+        for h in range(H):
+            e_h = attn_scores[h]  # [E]
+            # max per dst node
+            # initialize tensors to -inf and fill the maximum for each dst node
+            N = node_emb.size(0)
+            m = torch.full((N,), float("-inf"), device=e_h.device, dtype=e_h.dtype)
+            # per-dst max update
+            m.index_copy_(0, dst, torch.maximum(m[dst], e_h))
+            # gather m for edges
+            m_e = m[dst]
+            # stabilization: e' = e - m
+            e_shift = e_h - m_e
+            w = torch.exp(e_shift)
+            denom = scatter_add(w, dst, dim=0, dim_size=N)  # [N]
+            denom = denom.clamp_min(eps)
+            alpha = w / denom[dst]  # [E]
+            # optional dropout on attention weights (on edges)
+            if self.rel_attn_drop.p > 0.0:
+                alpha = self.rel_attn_drop(alpha)
+            attn.append(alpha)
 
         # 4. Message passing
         # Multiply source projection by attention weight
