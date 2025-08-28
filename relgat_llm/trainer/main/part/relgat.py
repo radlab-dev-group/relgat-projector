@@ -17,22 +17,26 @@ class RelGATMainTrainerHandler:
         with open(path_to_nodes, "rb") as f:
             _node2emb = pickle.load(f)
         _node2emb = {int(k): torch.tensor(v) for k, v in _node2emb.items()}
+        print(f"  - number of loaded nodes: {len(_node2emb)}")
 
         # rel2idx – dict[str, int]
         print("Loading", path_to_rels)
         with open(path_to_rels, "r") as f:
             _rel2idx = json.loads(f.read())
         _rel2idx = {str(k): int(v) for k, v in _rel2idx.items()}
+        print(f"  - number of loaded rel2idx: {len(_rel2idx)}")
 
         # edge_index_raw – list[(src, dst, rel_str)]
         print("Loading", path_to_edges)
         with open(path_to_edges, "r") as f:
             _edge_index_raw = json.loads(f.read())
+        print(f"  - number of loaded edges: {len(_edge_index_raw)}")
         _edge_index_raw = [
             [int(f), int(t), str(r)]
             for f, t, r in _edge_index_raw
-            if f in _node2emb and t in _node2emb
+            if int(f) in _node2emb and int(t) in _node2emb
         ]
+        print(f"  - number of edges after filtering: {len(_edge_index_raw)}")
 
         return _node2emb, _rel2idx, _edge_index_raw
 
@@ -69,6 +73,9 @@ class RelGATMainTrainerHandler:
             "max_checkpoints": args.max_checkpoints,
             "lr_decay": args.lr_decay,
             "disable_edge_type_mask": args.disable_edge_type_mask,
+            "use_self_adv_neg": args.use_self_adv_neg,
+            "self_adv_alpha": args.self_adv_alpha,
+            "dropout_rel_attention": args.dropout_rel_attention,
         }
         if args.warmup_steps is not None:
             run_cfg["warmup_steps"] = args.warmup_steps
@@ -87,6 +94,7 @@ class RelGATMainTrainerHandler:
             gat_heads=run_cfg["heads"],
             gat_num_layers=run_cfg["num_layers"],
             dropout=run_cfg["dropout"],
+            rel_attn_dropout=run_cfg["dropout_rel_attention"],
             run_name=args.run_name,
             device=torch.device(run_cfg["device"]),
             log_every_n_steps=run_cfg["log_every_n_steps"],
@@ -104,5 +112,7 @@ class RelGATMainTrainerHandler:
             log_grad_norm=True,
             disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
             profile_steps=run_cfg["log_every_n_steps"],
+            use_self_adv_neg=run_cfg["use_self_adv_neg"],
+            self_adv_alpha=run_cfg["self_adv_alpha"],
         )
         return trainer

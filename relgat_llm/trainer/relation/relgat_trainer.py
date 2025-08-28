@@ -36,6 +36,7 @@ class RelGATTrainer:
         gat_heads: int = 6,
         gat_num_layers: int = 1,
         dropout: float = 0.2,
+        rel_attn_dropout: float = 0.0,
         weight_decay: float = 0.0,
         grad_clip_norm: Optional[float] = None,
         early_stop_patience: Optional[int] = None,
@@ -53,6 +54,8 @@ class RelGATTrainer:
         save_dir: Optional[str] = None,
         save_every_n_steps: Optional[int] = None,
         eval_every_n_steps: Optional[int] = None,
+        use_self_adv_neg: bool = False,
+        self_adv_alpha: float = 1.0,
     ):
         # Reproducibility – seed
         self.seed = seed
@@ -80,6 +83,9 @@ class RelGATTrainer:
         self.max_checkpoints = max_checkpoints
         self.disable_edge_type_mask = disable_edge_type_mask
 
+        self.use_self_adv_neg = bool(use_self_adv_neg)
+        self.self_adv_alpha = float(self_adv_alpha)
+
         # Model saving – list of best checkpoints
         self.best_mrr = -float("inf")
         self.best_ckpt_dir: Path | None = None
@@ -96,6 +102,7 @@ class RelGATTrainer:
         self.gat_out_dim = gat_out_dim
         self.gat_heads = gat_heads
         self.dropout = dropout
+        self.rel_attn_dropout = rel_attn_dropout
         self.run_name = run_name
         self.gat_num_layers = gat_num_layers
 
@@ -216,6 +223,7 @@ class RelGATTrainer:
             gat_out_dim=self.gat_out_dim,
             gat_heads=self.gat_heads,
             dropout=self.dropout,
+            relation_attn_dropout=self.rel_attn_dropout,
             gat_num_layers=self.gat_num_layers,
         ).to(self.device)
 
@@ -233,6 +241,8 @@ class RelGATTrainer:
         # ensure lr and scheduler info are present in run config (for reproducibility)
         self.run_config["lr"] = self.base_lr
         self.run_config["lr_scheduler"] = self.scheduler_type
+        self.run_config["use_self_adv_neg"] = self.use_self_adv_neg
+        self.run_config["self_adv_alpha"] = self.self_adv_alpha
         #
         self.run_config["save_every_n_steps"] = self.save_every_n_steps
         self.run_config["save_dir"] = str(self.save_dir)
@@ -261,11 +271,30 @@ class RelGATTrainer:
         hits = {k: 1.0 if rank <= k else 0.0 for k in ks}
         return mrr, hits
 
+    @staticmethod
+    def self_adversarial_loss(
+        pos_score: torch.Tensor, neg_score: torch.Tensor, alpha: float = 1.0
+    ):
+        """
+        pos_score: [B], neg_score: [B, K]
+        L = -log σ(pos) - Σ_i softmax(α * neg_i) * log σ(-neg_i)
+        Wagi liczone bez gradientu (detach) dla stabilności.
+        """
+
+        with torch.no_grad():
+            weights = torch.softmax(alpha * neg_score, dim=1)  # [B, K]
+        pos_loss = -F.logsigmoid(pos_score).mean()
+        neg_loss = -(weights * F.logsigmoid(-neg_score)).sum(dim=1).mean()
+        return pos_loss + neg_loss
+
     def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
         self.model.eval()
         total_mrr = 0.0
         total_hits = {k: 0.0 for k in ks}
         n_examples = 0
+
+        total_loss = 0.0
+        total_pos = 0
 
         with torch.no_grad():
             for batch in tqdm(self.eval_loader, desc="Evaluation", leave=False):
@@ -289,6 +318,18 @@ class RelGATTrainer:
                 pos_score = scores[:B]
                 neg_score = scores[B:].view(B, self.num_neg)
 
+                # Less same as on the train part
+                if self.use_self_adv_neg:
+                    batch_loss = self.self_adversarial_loss(
+                        pos_score, neg_score, alpha=self.self_adv_alpha
+                    )
+                else:
+                    batch_loss = self.margin_ranking_loss(
+                        pos_score, neg_score, margin=1.0
+                    )
+                total_loss += batch_loss.item() * B
+                total_pos += B
+
                 for i in range(B):
                     cand_scores = torch.cat(
                         [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
@@ -302,7 +343,11 @@ class RelGATTrainer:
         n_examples = max(1, n_examples)
         avg_mrr = total_mrr / n_examples
         avg_hits = {k: total_hits[k] / n_examples for k in ks}
-        return avg_mrr, avg_hits
+
+        # average eval loss on positive example
+        avg_eval_loss = total_loss / max(1, total_pos)
+
+        return avg_mrr, avg_hits, avg_eval_loss
 
     # The main training loop
     def train(self, epochs: int = 12, margin: float = 1.0):
@@ -374,6 +419,8 @@ class RelGATTrainer:
                 "scheduler/total_steps": total_steps,
                 "scheduler/warmup_steps": warmup_steps,
                 "scheduler/type": self.scheduler_type,
+                "config/use_self_adv_neg": float(self.use_self_adv_neg),
+                "config/self_adv_alpha": float(self.self_adv_alpha),
                 "train/base_lr": self.base_lr,
             },
             step=self.global_step,
@@ -416,9 +463,14 @@ class RelGATTrainer:
                     B = len(pos)
                     pos_score = scores[:B]
                     neg_score = scores[B:].view(B, self.num_neg)
-                    loss = self.margin_ranking_loss(
-                        pos_score, neg_score, margin=margin
-                    )
+                    if self.use_self_adv_neg:
+                        loss = self.self_adversarial_loss(
+                            pos_score, neg_score, alpha=self.self_adv_alpha
+                        )
+                    else:
+                        loss = self.margin_ranking_loss(
+                            pos_score, neg_score, margin=margin
+                        )
 
                 # scaler backward if enabled
                 if self.use_amp:
@@ -492,6 +544,14 @@ class RelGATTrainer:
                             "train/grad_norm": grad_norm,
                             "train/lr": current_lr,
                             "train/step_time": step_time,
+                            "train/pos_score_mean": (
+                                pos_score.detach().mean().item() if B > 0 else 0.0
+                            ),
+                            "train/neg_score_mean": (
+                                neg_score.detach().mean().item()
+                                if neg_score.numel() > 0
+                                else 0.0
+                            ),
                         },
                         step=self.global_step,
                     )
@@ -506,21 +566,23 @@ class RelGATTrainer:
                 ):
                     avg_train_loss = epoch_loss / len(self.train_dataset)
                     # ----------------- EVAL -----------------
-                    mrr, hits = self.evaluate(ks=(1, 2, 3))
+                    mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
                     hits_str = ", ".join(
                         [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
                     )
                     print(
                         f"\n=== Step {self.global_step:12d} – "
-                        f"loss: {epoch_loss:.4f} "
-                        f"[avg. loss: {avg_train_loss:.4f}]"
+                        f"train loss: {avg_train_loss:.4f}"
                     )
-                    print(f"   - eval – MRR: {mrr:.4f} | {hits_str}")
+                    print(
+                        f"   - eval – loss: {eval_loss:.4f} |"
+                        f" MRR: {mrr:.4f} | {hits_str}"
+                    )
                     # ----------------- LOG TO W&B -----------------
                     WanDBHandler.log_metrics(
                         metrics={
                             "epoch": epoch,
-                            "eval/loss": avg_train_loss,
+                            "eval/loss": eval_loss,
                             "eval/mrr": mrr,
                             "eval/hits@1": hits[1],
                             "eval/hits@2": hits[2],
@@ -565,17 +627,21 @@ class RelGATTrainer:
             if self.eval_every_n_steps is None:
                 avg_train_loss = epoch_loss / len(self.train_dataset)
                 # ----------------- EVAL -----------------
-                mrr, hits = self.evaluate(ks=(1, 2, 3))
+                mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
                 hits_str = ", ".join(
                     [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
                 )
-                print(f"\n=== Epoch {epoch:02d} – loss: {avg_train_loss:.4f}")
-                print(f"   - eval – MRR: {mrr:.4f} | {hits_str}")
+                print(f"\n=== Epoch {epoch:02d} – train loss: {avg_train_loss:.4f}")
+                print(
+                    f"   - eval – loss: {eval_loss:.4f} | "
+                    f"MRR: {mrr:.4f} | {hits_str}"
+                )
                 # ----------------- LOG TO W&B -----------------
                 WanDBHandler.log_metrics(
                     metrics={
                         "epoch": epoch,
-                        "eval/loss": avg_train_loss,
+                        "train/loss": avg_train_loss,
+                        "eval/loss": eval_loss,
                         "eval/mrr": mrr,
                         "eval/hits@1": hits[1],
                         "eval/hits@2": hits[2],
