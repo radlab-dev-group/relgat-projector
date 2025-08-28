@@ -127,6 +127,14 @@ def get_args() -> argparse.Namespace:
         f"(default: {ConstantsRelGATTrainer.Default.GAT_DROPOUT})",
     )
     parser.add_argument(
+        "--dropout-relation-attention",
+        dest="dropout_rel_attention",
+        type=float,
+        default=ConstantsRelGATTrainer.Default.GAT_ATT_DROPOUT,
+        help=f"GAT attention dropout on relations"
+        f"(default: {ConstantsRelGATTrainer.Default.GAT_DROPOUT})",
+    )
+    parser.add_argument(
         "--lr",
         dest="lr",
         type=float,
@@ -169,6 +177,17 @@ def get_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="If set, clips gradient norm to this value (default: None – no clipping)",
+    )
+    parser.add_argument(
+        "--use-self-adv-neg",
+        action="store_true",
+        help="Enable self-adversarial negative sampling.",
+    )
+    parser.add_argument(
+        "--self-adv-alpha",
+        type=float,
+        default=1.0,
+        help="Temperature for weighting negatives.",
     )
     parser.add_argument(
         "--eval-every-n-steps",

@@ -10,7 +10,7 @@ CUDA_DEVICES="0"
 MAX_CHECKPOINTS=5
 
 # Ratio of training data
-TRAIN_EVAL_DATASET_RATIO="0.80"
+TRAIN_EVAL_DATASET_RATIO="0.90"
 
 # Which architecture will be trained {small, medium}
 ARCHITECTURE="small"
@@ -21,41 +21,44 @@ ARCHITECTURE="small"
 # =============================================================================
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
-  # Tain/eval batch size
-  BATCH_SIZE=64
-  # Out RelGAT dimension (for each head)
+  BATCH_SIZE=512
   GAT_OUT_DIM=128
-  # Number of layers
-  NUM_OF_LAYERS=1
-  # Number of heads (each with projection to GAT_OUT_DIM)
-  NUM_OF_HEADS=6
+  NUM_OF_LAYERS=2
+  NUM_OF_HEADS=4
+  EPOCHS=30
+  NUM_NEG_TO_POS=8
+  LEARNING_RATE=0.0005
 elif [[ "${ARCHITECTURE}" == "medium" ]]
 then
-  # Tain/eval batch size
-  BATCH_SIZE=32
-  # Out RelGAT dimension (for each head)
+  BATCH_SIZE=256
   GAT_OUT_DIM=256
-  # Number of layers
   NUM_OF_LAYERS=3
-  # Number of heads (each with projection to GAT_OUT_DIM)
+  NUM_OF_HEADS=8
+  EPOCHS=40
+  NUM_NEG_TO_POS=16
+  LEARNING_RATE=0.00035
+elif [[ "${ARCHITECTURE}" == "large" ]]
+then
+  BATCH_SIZE=128
+  GAT_OUT_DIM=256
+  NUM_OF_LAYERS=4
   NUM_OF_HEADS=12
+  EPOCHS=50
+  NUM_NEG_TO_POS=32
+  LEARNING_RATE=0.00015
 else
-  echo "Supported architectures: [small, medium]"
+  echo "Supported architectures: [small, medium, large]"
   exit 1
 fi
-
-# Number of epochs
-EPOCHS=10
+# =============================================================================
 # Scorer, one of: [distmult, transe]
 SCORER="distmult"
-# Dropout used while training
+# Dropout used while training (on embedder dimension)
 DROPOUT=0.3
-# Number of negative examples for each positive one
-NUM_NEG_TO_POS=4
+# Relation attention dropout
+DROPOUT_REL_ATT=0.0
 # Logging during training after each n steps
 LOG_EVERY_N_STEPS=10
-# Learning rate
-LEARNING_RATE=0.00005
 # Multiplicative factor applied to LR after warm‑up (default: 1.0 – no change)
 LR_DECAY=1.0
 # Learning rate scheduler, one of: [linear, cosine, constant]
@@ -73,6 +76,8 @@ EARLY_STOP_PATIENCE_STEPS=10
 # If set, the model will not mask edges by relation type - to use option
 # uncomment next line
 #DISABLE_EDGE_TYPES=1
+# Enable self-adversarial negative sampling instead of margin ranking loss
+#USE_SELF_ADV_NEG=1
 
 # =============================================================================
 # =============================================================================
@@ -80,9 +85,9 @@ EARLY_STOP_PATIENCE_STEPS=10
 # Output directory to store the model and checkpoints during training
 OUT_MODEL_DIR="relgat-models/relgat-${ARCHITECTURE}_$(date +%Y%m%d_%H%M%S)"
 # Save model every n steps
-SAVE_N_STEPS=2000
+SAVE_N_STEPS=300
 # Optional explicit eval steps, if not given, then eval will be done after each epoch
-EVAL_N_STEPS=1000
+EVAL_N_STEPS=300
 #
 # =============================================================================
 # =============================================================================
@@ -104,7 +109,6 @@ RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
 # =============================================================================
 export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
 relgat-train \
-  --warmup-steps="${WARMUP_STEPS}" \
   --lr="${LEARNING_RATE}" \
   --lr-decay="${LR_DECAY}" \
   --early-stop-patience="${EARLY_STOP_PATIENCE_STEPS}" \
@@ -116,6 +120,7 @@ relgat-train \
   --epochs="${EPOCHS}" \
   --scorer="${SCORER}" \
   --dropout="${DROPOUT}" \
+  --dropout-relation-attention="${DROPOUT_REL_ATT}" \
   --gat-out-dim="${GAT_OUT_DIM}" \
   --train-ratio="${TRAIN_EVAL_DATASET_RATIO}" \
   --batch-size="${BATCH_SIZE}" \
@@ -131,4 +136,5 @@ relgat-train \
   ${WARMUP_STEPS:+--warmup-steps="${WARMUP_STEPS}"} \
   ${GRADIENT_CLIPPING:+--grad-clip-norm="${GRADIENT_CLIPPING}"} \
   ${USE_AMP:+--use-amp="${USE_AMP}"} \
-  ${DISABLE_EDGE_TYPES:+--disable-edge-type-mask="${DISABLE_EDGE_TYPES}"}
+  ${DISABLE_EDGE_TYPES:+--disable-edge-type-mask="${DISABLE_EDGE_TYPES}"} \
+  ${USE_SELF_ADV_NEG:+----use-self-adv-neg="${USE_SELF_ADV_NEG}"}
