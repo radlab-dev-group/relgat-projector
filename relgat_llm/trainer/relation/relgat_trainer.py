@@ -255,21 +255,26 @@ class RelGATTrainer:
 
     # Helper methods (loss, ranking, evaluation)
     @staticmethod
+    def compute_mrr_hits(
+        scores: torch.Tensor, true_idx: int = 0, ks: Tuple[int, ...] = (1, 3, 10)
+    ):
+        # Zabezpieczenie: NaN/±inf traktujemy jako "bardzo słabe" wyniki,
+        # by nie windowały MRR do 1.0
+        s = torch.nan_to_num(scores, nan=-1e9, neginf=-1e9, posinf=1e9)
+        if not torch.isfinite(s[true_idx]):
+            s[true_idx] = -1e9
+        rank = (s > s[true_idx]).sum().item() + 1
+        mrr = 1.0 / max(1, rank)
+        hits = {k: 1.0 if rank <= k else 0.0 for k in ks}
+        return mrr, hits
+
+    @staticmethod
     def margin_ranking_loss(
         pos_score: torch.Tensor, neg_score: torch.Tensor, margin: float = 1.0
     ):
         pos = pos_score.unsqueeze(1).expand_as(neg_score)
         loss = F.relu(margin + neg_score - pos)
         return loss.mean()
-
-    @staticmethod
-    def compute_mrr_hits(
-        scores: torch.Tensor, true_idx: int = 0, ks: Tuple[int, ...] = (1, 3, 10)
-    ):
-        rank = (scores > scores[true_idx]).sum().item() + 1
-        mrr = 1.0 / rank
-        hits = {k: 1.0 if rank <= k else 0.0 for k in ks}
-        return mrr, hits
 
     @staticmethod
     def self_adversarial_loss(
@@ -280,11 +285,18 @@ class RelGATTrainer:
         L = -log σ(pos) - Σ_i softmax(α * neg_i) * log σ(-neg_i)
         Wagi liczone bez gradientu (detach) dla stabilności.
         """
+        # Klamrowanie dla stabilności i usunięcie niefinitych
+        pos = torch.nan_to_num(pos_score, nan=0.0, neginf=-20.0, posinf=20.0).clamp(
+            -20.0, 20.0
+        )
+        neg = torch.nan_to_num(neg_score, nan=0.0, neginf=-20.0, posinf=20.0).clamp(
+            -20.0, 20.0
+        )
 
         with torch.no_grad():
-            weights = torch.softmax(alpha * neg_score, dim=1)  # [B, K]
-        pos_loss = -F.logsigmoid(pos_score).mean()
-        neg_loss = -(weights * F.logsigmoid(-neg_score)).sum(dim=1).mean()
+            weights = torch.softmax(alpha * neg, dim=1)  # [B, K]
+        pos_loss = -F.logsigmoid(pos).mean()
+        neg_loss = -(weights * F.logsigmoid(-neg)).sum(dim=1).mean()
         return pos_loss + neg_loss
 
     def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
@@ -314,19 +326,32 @@ class RelGATTrainer:
                 ).to(self.device)
 
                 scores = self.model(src_ids, rel_ids, dst_ids)  # [B*(1+num_neg)]
+
+                # Zabezpieczenie: policz i napraw niefinity
+                nonfinite = (~torch.isfinite(scores)).sum().item()
+                if nonfinite > 0:
+                    WanDBHandler.log_metrics(
+                        {"eval/nonfinite_scores": nonfinite}, step=self.global_step
+                    )
+                    scores = torch.nan_to_num(
+                        scores, nan=0.0, neginf=-1e9, posinf=1e9
+                    )
+
                 B = len(pos)
                 pos_score = scores[:B]
                 neg_score = scores[B:].view(B, self.num_neg)
 
-                # Less same as on the train part
+                # Loss policz na klamrowanych wartościach
+                pos_s = pos_score.clamp(-20.0, 20.0)
+                neg_s = neg_score.clamp(-20.0, 20.0)
+
                 if self.use_self_adv_neg:
                     batch_loss = self.self_adversarial_loss(
-                        pos_score, neg_score, alpha=self.self_adv_alpha
+                        pos_s, neg_s, alpha=self.self_adv_alpha
                     )
                 else:
-                    batch_loss = self.margin_ranking_loss(
-                        pos_score, neg_score, margin=1.0
-                    )
+                    batch_loss = self.margin_ranking_loss(pos_s, neg_s, margin=1.0)
+
                 total_loss += batch_loss.item() * B
                 total_pos += B
 
@@ -334,6 +359,7 @@ class RelGATTrainer:
                     cand_scores = torch.cat(
                         [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
                     )
+                    # compute_mrr_hits już sanetyzuje
                     mrr, hits = self.compute_mrr_hits(cand_scores, true_idx=0, ks=ks)
                     total_mrr += mrr
                     for k in ks:
@@ -429,15 +455,13 @@ class RelGATTrainer:
         for epoch in range(1, epochs + 1):
             self.model.train()
             epoch_loss = 0.0
-
-            # counter for incremental logging
             running_loss = 0.0
             running_examples = 0
             # ----------------- TRAIN -----------------
             for step_in_epoch, batch in enumerate(
                 tqdm(
                     self.train_loader,
-                    desc=f"Epoch {epoch:02d} – training",
+                    desc=f"Epoch {epoch:02d}/{epochs:02d} – training",
                     leave=False,
                 ),
                 start=1,
@@ -457,12 +481,24 @@ class RelGATTrainer:
 
                 # use auto casting
                 with torch.amp.autocast("cuda", enabled=self.use_amp):
-                    # zero grads before backward
                     self.optimizer.zero_grad(set_to_none=True)
                     scores = self.model(src_ids, rel_ids, dst_ids)
+
+                    # Zabezpieczenie: policz i napraw niefinity
+                    nonfinite = (~torch.isfinite(scores)).sum().item()
+                    if nonfinite > 0:
+                        WanDBHandler.log_metrics(
+                            {"train/nonfinite_scores": nonfinite},
+                            step=self.global_step,
+                        )
+                        scores = torch.nan_to_num(
+                            scores, nan=0.0, neginf=-1e9, posinf=1e9
+                        )
+
                     B = len(pos)
-                    pos_score = scores[:B]
-                    neg_score = scores[B:].view(B, self.num_neg)
+                    pos_score = scores[:B].clamp(-20.0, 20.0)
+                    neg_score = scores[B:].view(B, self.num_neg).clamp(-20.0, 20.0)
+
                     if self.use_self_adv_neg:
                         loss = self.self_adversarial_loss(
                             pos_score, neg_score, alpha=self.self_adv_alpha
@@ -471,6 +507,15 @@ class RelGATTrainer:
                         loss = self.margin_ranking_loss(
                             pos_score, neg_score, margin=margin
                         )
+
+                # Jeśli loss nie jest skończony – przerwij ten krok i zaloguj
+                if not torch.isfinite(loss):
+                    WanDBHandler.log_metrics(
+                        {"train/nonfinite_loss_steps": 1}, step=self.global_step
+                    )
+                    print("Non‑finite loss encountered. Skipping step.")
+                    self.optimizer.zero_grad(set_to_none=True)
+                    continue
 
                 # scaler backward if enabled
                 if self.use_amp:

@@ -76,6 +76,7 @@ class RelGATMainTrainerHandler:
             "use_self_adv_neg": args.use_self_adv_neg,
             "self_adv_alpha": args.self_adv_alpha,
             "dropout_rel_attention": args.dropout_rel_attention,
+            "architecture": args.architecture,
         }
         if args.warmup_steps is not None:
             run_cfg["warmup_steps"] = args.warmup_steps
