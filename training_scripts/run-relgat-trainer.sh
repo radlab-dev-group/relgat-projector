@@ -10,7 +10,7 @@ CUDA_DEVICES="0"
 MAX_CHECKPOINTS=5
 
 # Ratio of training data
-TRAIN_EVAL_DATASET_RATIO="0.99"
+TRAIN_EVAL_DATASET_RATIO="0.90"
 
 # Which architecture will be trained {small, medium}
 ARCHITECTURE="small"
@@ -21,7 +21,7 @@ ARCHITECTURE="small"
 # =============================================================================
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
-  BATCH_SIZE=1
+  BATCH_SIZE=512
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
   NUM_OF_HEADS=4
@@ -85,9 +85,9 @@ EARLY_STOP_PATIENCE_STEPS=10
 # Output directory to store the model and checkpoints during training
 OUT_MODEL_DIR="relgat-models/relgat-${ARCHITECTURE}_$(date +%Y%m%d_%H%M%S)"
 # Save model every n steps
-SAVE_N_STEPS=2000
+SAVE_N_STEPS=300
 # Optional explicit eval steps, if not given, then eval will be done after each epoch
-EVAL_N_STEPS=1000
+EVAL_N_STEPS=300
 #
 # =============================================================================
 # =============================================================================
@@ -109,7 +109,6 @@ RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
 # =============================================================================
 export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
 relgat-train \
-  --warmup-steps="${WARMUP_STEPS}" \
   --lr="${LEARNING_RATE}" \
   --lr-decay="${LR_DECAY}" \
   --early-stop-patience="${EARLY_STOP_PATIENCE_STEPS}" \
