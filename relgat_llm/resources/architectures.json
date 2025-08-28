@@ -1,0 +1,19 @@
+{
+  "architectures": {
+    "small": {
+      "gat_out_dim": 128,
+      "layers": 2,
+      "heads": 8
+    },
+    "medium": {
+      "gat_out_dim": 128,
+      "layers": 3,
+      "heads": 10
+    },
+    "large": {
+      "gat_out_dim": 256,
+      "layers": 4,
+      "heads": 12
+    }
+  }
+}

@@ -27,6 +27,15 @@ from relgat_llm.trainer.main.part.constants import ConstantsRelGATTrainer
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=APP_DESCRIPTION)
 
+    # Architecture name
+    parser.add_argument(
+        "--architecture-name",
+        dest="architecture",
+        required=True,
+        type=str,
+        help="The architecture name [small, medium, large, ...]",
+    )
+
     # Dataset
     parser.add_argument(
         "--nodes-embeddings-path",
