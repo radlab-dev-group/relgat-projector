@@ -3,8 +3,8 @@ import torch
 import pickle
 import argparse
 
-from relgat_llm.trainer.relation.relgat_trainer import RelGATTrainer
-from relgat_llm.trainer.main.part.constants import ConstantsRelGATTrainer
+from relgat_llm.trainer.relgat_base import RelGATTrainer
+from relgat_llm.base.constants import ConstantsRelGATTrainer
 
 
 class RelGATMainTrainerHandler:

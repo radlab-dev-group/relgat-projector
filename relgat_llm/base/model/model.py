@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from relgat_llm.trainer.relation.layer import RelGATLayer
-from relgat_llm.trainer.relation.scorer import DistMultScorer, TransEScorer
+from relgat_llm.base.model.layer import RelGATLayer
+from relgat_llm.base.model.scorer import DistMultScorer, TransEScorer
 
 
 class RelGATModel(nn.Module):

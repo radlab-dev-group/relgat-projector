@@ -9,7 +9,7 @@ long_description = (
 
 setup(
     name="relgat-trainer",
-    version="0.0.1",
+    version="0.1.0",
     description="A lightweight trainer for Relational Graph Attention Networks (RelGAT).",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -49,8 +49,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            # Uruchamianie: `relgat-train --help`
-            "relgat-train=relgat_llm.trainer.main.relgat:main",
+            "relgat-base-train=relgat_apps.trainers.relgat_base:main",
         ]
     },
     classifiers=[
