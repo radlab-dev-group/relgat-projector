@@ -11,13 +11,14 @@ from tqdm import tqdm
 from pathlib import Path
 from collections import deque
 from torch.utils.data import DataLoader
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
 
-from plwordnet_ml.utils.wandb_handler import WanDBHandler
+# RadLab ML utils dependency
+from rdl_ml_utils.handlers.wandb import WanDBHandler
 
-from relgat_llm.trainer.relation.model import RelGATModel
-from relgat_llm.trainer.relation.dataset import EdgeDataset
-from relgat_llm.trainer.main.part.constants import ConstantsRelGATTrainer
+from relgat_llm.dataset.edge import EdgeDataset
+from relgat_llm.base.model.model import RelGATModel
+from relgat_llm.base.constants import ConstantsRelGATTrainer
 
 
 class RelGATTrainer:

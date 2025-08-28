@@ -13,7 +13,7 @@ MAX_CHECKPOINTS=5
 TRAIN_EVAL_DATASET_RATIO="0.90"
 
 # Which architecture will be trained {small, medium, large}
-ARCHITECTURE="-"
+ARCHITECTURE="small"
 
 # =============================================================================
 # =============================================================================
@@ -129,7 +129,7 @@ RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
 # --------------------  APPLICATION CALL
 # =============================================================================
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-train \
+CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-base-train \
   --architecture="${ARCHITECTURE}" \
   --lr="${LEARNING_RATE}" \
   --lr-decay="${LR_DECAY}" \

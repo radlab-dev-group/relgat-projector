@@ -9,6 +9,21 @@ negative sampling, LR scheduling, checkpointing, and optional Weights & Biases l
 - Requirements: Python 3.9+, pip, and a PyTorch-compatible environment (CPU or CUDA).
 - Binary note: torch and torch-scatter must match your PyTorch/CUDA stack.
 
+> **Prerequisite**: `radlab-ml-utils`
+>
+> This project uses the 
+> [radlab-ml-utils](https://github.com/radlab-dev-group/radlab-ml-utils) 
+> library for machine learning utilities 
+> (e.g., experiment/result logging with Weights & Biases/wandb).
+> Install it before working with ML-related parts:
+>
+> ```bash
+> pip install git+https://github.com/radlab-dev-group/radlab-ml-utils.git
+> ```
+>
+> For more options and details, see the library README: 
+> https://github.com/radlab-dev-group/radlab-ml-utils
+
 Install from local source:
 ```bash 
 pip install .
@@ -26,7 +41,7 @@ pip install "git+[https://github.com/radlab-dev-group/relgat-llm.git#egg=relgat-
 
 After installation, a console entry point is available:
 ```bash
-relgat-train --help
+relgat-base-train --help
 ```
 
 If you run into issues with torch-scatter (especially on GPU), install the 
@@ -66,7 +81,7 @@ plwordnet-milvus
 Train a model with your prepared files:
 
 ```bash
-relgat-train
+relgat-base-train
     --nodes-embeddings-path /path/to/nodes_embeddings.pt
     --relations-mapping /path/to/relations_mapping.json
     --relations-triplets /path/to/relations_triplets.tsv
