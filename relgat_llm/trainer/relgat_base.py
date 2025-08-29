@@ -1,11 +1,9 @@
+import abc
 import json
 import time
 import shutil
 import torch
 import random
-
-import numpy as np
-import torch.nn.functional as F
 
 from tqdm import tqdm
 from pathlib import Path
@@ -20,51 +18,52 @@ from relgat_llm.dataset.edge import EdgeDataset
 from relgat_llm.base.model.model import RelGATModel
 from relgat_llm.base.constants import ConstantsRelGATTrainer
 
+from relgat_llm.trainer.core.any_repr_trainer import AnyReproductiveTrainerI
+from relgat_llm.trainer.core.any_storage_trainer import RelGATTrainerBaseStorageI
 
-class RelGATTrainer:
+
+class RelGATTrainer(AnyReproductiveTrainerI, RelGATTrainerBaseStorageI):
     def __init__(
         self,
-        node2emb: Dict[int, torch.Tensor],
-        rel2idx: Dict[str, int],
-        edge_index_raw: List[Tuple[int, int, str]],
         run_config: Dict,
-        wandb_config,
-        train_batch_size: int = 1024,
-        num_neg: int = 4,
-        train_ratio: float = 0.90,
-        scorer_type: str = "distmult",
-        gat_out_dim: int = 200,
-        gat_heads: int = 6,
-        gat_num_layers: int = 1,
-        dropout: float = 0.2,
-        rel_attn_dropout: float = 0.0,
-        weight_decay: float = 0.0,
-        grad_clip_norm: Optional[float] = None,
-        early_stop_patience: Optional[int] = None,
-        use_amp: bool = False,
+        # node2emb: Dict[int, torch.Tensor],
+        # rel2idx: Dict[str, int],
+        # edge_index_raw: List[Tuple[int, int, str]],
+        # wandb_config,
+        # train_batch_size: int = 1024,
+        # num_neg: int = 4,
+        # train_ratio: float = 0.90,
+        # scorer_type: str = "distmult",
+        # gat_out_dim: int = 200,
+        # gat_heads: int = 6,
+        # gat_num_layers: int = 1,
+        # dropout: float = 0.2,
+        # rel_attn_dropout: float = 0.0,
+        # weight_decay: float = 0.0,
+        # grad_clip_norm: Optional[float] = None,
+        # early_stop_patience: Optional[int] = None,
+        # use_amp: bool = False,
         seed: int = 42,
         max_checkpoints: int = 5,
-        lr: float = 0.0001,
-        lr_decay: float = 1.0,
-        log_grad_norm: bool = False,
-        disable_edge_type_mask: bool = False,
-        profile_steps: int = 0,
-        device: Optional[torch.device] = None,
-        run_name: Optional[str] = None,
-        log_every_n_steps: int = 100,
-        save_dir: Optional[str] = None,
-        save_every_n_steps: Optional[int] = None,
-        eval_every_n_steps: Optional[int] = None,
-        use_self_adv_neg: bool = False,
-        self_adv_alpha: float = 1.0,
+        # lr: float = 0.0001,
+        # lr_decay: float = 1.0,
+        # log_grad_norm: bool = False,
+        # disable_edge_type_mask: bool = False,
+        # profile_steps: int = 0,
+        # device: Optional[torch.device] = None,
+        # run_name: Optional[str] = None,
+        # log_every_n_steps: int = 100,
+        out_dir: Optional[str] = None,  # OK
+        # save_every_n_steps: Optional[int] = None,
+        # eval_every_n_steps: Optional[int] = None,
+        # use_self_adv_neg: bool = False,
+        # self_adv_alpha: float = 1.0,
+
     ):
-        # Reproducibility – seed
-        self.seed = seed
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(self.seed)
+        AnyReproductiveTrainerI.__init__(self, seed=seed, run_config=run_config)
+        RelGATTrainerBaseStorageI.__init__(
+            self, out_dir=out_dir, max_checkpoints=max_checkpoints, run_config=run_config
+        )
 
         self._no_improve_steps = 0
         self.log_grad_norm = log_grad_norm
@@ -89,10 +88,6 @@ class RelGATTrainer:
 
         # Model saving – list of best checkpoints
         self.best_mrr = -float("inf")
-        self.best_ckpt_dir: Path | None = None
-
-        # Fifo queue
-        self.saved_checkpoints: deque[Path] = deque()
 
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -120,12 +115,6 @@ class RelGATTrainer:
         )
 
         # Model saving
-        self.save_dir = (
-            Path(save_dir)
-            if save_dir is not None
-            else Path(ConstantsRelGATTrainer.Default.DEFAULT_TRAINER_OUT_DIR)
-        )
-        self.save_dir.mkdir(parents=True, exist_ok=True)
         self.save_every_n_steps = (
             int(save_every_n_steps)
             if save_every_n_steps is not None and int(save_every_n_steps) > 0
@@ -268,37 +257,6 @@ class RelGATTrainer:
         mrr = 1.0 / max(1, rank)
         hits = {k: 1.0 if rank <= k else 0.0 for k in ks}
         return mrr, hits
-
-    @staticmethod
-    def margin_ranking_loss(
-        pos_score: torch.Tensor, neg_score: torch.Tensor, margin: float = 1.0
-    ):
-        pos = pos_score.unsqueeze(1).expand_as(neg_score)
-        loss = F.relu(margin + neg_score - pos)
-        return loss.mean()
-
-    @staticmethod
-    def self_adversarial_loss(
-        pos_score: torch.Tensor, neg_score: torch.Tensor, alpha: float = 1.0
-    ):
-        """
-        pos_score: [B], neg_score: [B, K]
-        L = -log σ(pos) - Σ_i softmax(α * neg_i) * log σ(-neg_i)
-        Wagi liczone bez gradientu (detach) dla stabilności.
-        """
-        # Klamrowanie dla stabilności i usunięcie niefinitych
-        pos = torch.nan_to_num(pos_score, nan=0.0, neginf=-20.0, posinf=20.0).clamp(
-            -20.0, 20.0
-        )
-        neg = torch.nan_to_num(neg_score, nan=0.0, neginf=-20.0, posinf=20.0).clamp(
-            -20.0, 20.0
-        )
-
-        with torch.no_grad():
-            weights = torch.softmax(alpha * neg, dim=1)  # [B, K]
-        pos_loss = -F.logsigmoid(pos).mean()
-        neg_loss = -(weights * F.logsigmoid(-neg)).sum(dim=1).mean()
-        return pos_loss + neg_loss
 
     def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
         self.model.eval()
@@ -648,7 +606,7 @@ class RelGATTrainer:
                             self.best_ckpt_dir = (
                                 f"best_checkpoint_{self.global_step}"
                             )
-                            self._save_checkpoint(subdir=self.best_ckpt_dir)
+                            self._save_model_and_files(subdir=self.best_ckpt_dir)
                             self._prune_checkpoints()
 
                             # log saved checkpoint to w&b
@@ -701,7 +659,7 @@ class RelGATTrainer:
             f"relgat_{self.scorer_type}"
             f"_ratio{int(self.run_config['train_ratio'] * 100)}"
         )
-        self._save_checkpoint(subdir=out_model_dir)
+        self._save_model_and_files(subdir=out_model_dir)
         print(f"\nTraining finished – model saved to: {out_model_dir}")
 
         # ----------------- ARTIFACT W&B -----------------
@@ -717,36 +675,50 @@ class RelGATTrainer:
 
         Returns saved file (model) path.
         """
-        out_dir = self.save_dir / subdir
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / ConstantsRelGATTrainer.Default.OUT_MODEL_NAME
-        torch.save(self.model.state_dict(), out_path)
-
-        _files = [
-            (
-                ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME,
-                self.run_config,
-            ),
-            (
-                ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
-                self.rel2idx,
-            ),
-        ]
-        for f_name, json_data in _files:
-            out_cfg_path = out_dir / f_name
-            with open(out_cfg_path, "w") as f:
-                f.write(json.dumps(json_data, indent=2, ensure_ascii=False))
-        return str(out_path)
-
-    def _prune_checkpoints(self) -> None:
-        """
-        Keeps a maximum of max_checkpoints most recent (or best) checkpoints.
-        The oldest ones are deleted from the disc.
-        """
-        while len(self.saved_checkpoints) > self.max_checkpoints:
-            oldest = self.saved_checkpoints.popleft()
-            try:
-                shutil.rmtree(oldest)
-                print(f"️ Removed old checkpoint: {oldest}")
-            except Exception as exc:
-                print(f" Could not delete {oldest}: {exc}")
+        self._save_model_and_files(
+            subdir=subdir,
+            model=self.model,
+            files=[
+                (
+                    ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME,
+                    self.run_config,
+                ),
+                (
+                    ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
+                    self.rel2idx,
+                ),
+            ]
+        )
+    #     out_dir = self.save_dir / subdir
+    #     out_dir.mkdir(parents=True, exist_ok=True)
+    #     out_path = out_dir / ConstantsRelGATTrainer.Default.OUT_MODEL_NAME
+    #     torch.save(self.model.state_dict(), out_path)
+    #
+    #     _files = [
+    #         (
+    #             ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME,
+    #             self.run_config,
+    #         ),
+    #         (
+    #             ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
+    #             self.rel2idx,
+    #         ),
+    #     ]
+    #     for f_name, json_data in _files:
+    #         out_cfg_path = out_dir / f_name
+    #         with open(out_cfg_path, "w") as f:
+    #             f.write(json.dumps(json_data, indent=2, ensure_ascii=False))
+    #     return str(out_path)
+    #
+    # def _prune_checkpoints(self) -> None:
+    #     """
+    #     Keeps a maximum of max_checkpoints most recent (or best) checkpoints.
+    #     The oldest ones are deleted from the disc.
+    #     """
+    #     while len(self.saved_checkpoints) > self.max_checkpoints:
+    #         oldest = self.saved_checkpoints.popleft()
+    #         try:
+    #             shutil.rmtree(oldest)
+    #             print(f"️ Removed old checkpoint: {oldest}")
+    #         except Exception as exc:
+    #             print(f" Could not delete {oldest}: {exc}")

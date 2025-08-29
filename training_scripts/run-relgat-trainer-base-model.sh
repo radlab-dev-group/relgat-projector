@@ -40,7 +40,7 @@ then
   BATCH_SIZE=256
   NUM_NEG_TO_POS=16
 
-  LEARNING_RATE=0.00005
+  LEARNING_RATE=0.00008
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=3
@@ -91,7 +91,7 @@ LR_SCHEDULER="linear"
 WEIGHT_DECAY=0.0
 
 # If set, clips gradient norm to this value (default: None – no clipping)
-#GRADIENT_CLIPPING=5
+GRADIENT_CLIPPING=1.0
 
 # Number of evaluation steps without improvement after which training stops
 EARLY_STOP_PATIENCE_STEPS=10
