@@ -8,63 +8,124 @@ import random
 from tqdm import tqdm
 from pathlib import Path
 from collections import deque
-from torch.utils.data import DataLoader
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 # RadLab ML utils dependency
 from rdl_ml_utils.handlers.wandb import WanDBHandler
 
-from relgat_llm.dataset.edge import EdgeDataset
 from relgat_llm.base.model.model import RelGATModel
 from relgat_llm.base.constants import ConstantsRelGATTrainer
 
+from relgat_llm.trainer.core.any_lr_trainer import AnyLRTrainerI
 from relgat_llm.trainer.core.any_repr_trainer import AnyReproductiveTrainerI
+from relgat_llm.trainer.core.relgat_dataset import AnyRelGATModelDatasetI
 from relgat_llm.trainer.core.any_storage_trainer import RelGATTrainerBaseStorageI
+from relgat_llm.trainer.core.any_architecture import AnyModelArchitectureConstructorI
 
 
-class RelGATTrainer(AnyReproductiveTrainerI, RelGATTrainerBaseStorageI):
+class RelGATTrainer(
+    AnyReproductiveTrainerI,
+    AnyLRTrainerI,
+    AnyModelArchitectureConstructorI,
+    AnyRelGATModelDatasetI,
+    RelGATTrainerBaseStorageI,
+):
     def __init__(
         self,
+        # Whole config -- with prior higher than args
         run_config: Dict,
-        # node2emb: Dict[int, torch.Tensor],
-        # rel2idx: Dict[str, int],
-        # edge_index_raw: List[Tuple[int, int, str]],
-        # wandb_config,
-        # train_batch_size: int = 1024,
-        # num_neg: int = 4,
-        # train_ratio: float = 0.90,
-        # scorer_type: str = "distmult",
-        # gat_out_dim: int = 200,
-        # gat_heads: int = 6,
-        # gat_num_layers: int = 1,
-        # dropout: float = 0.2,
-        # rel_attn_dropout: float = 0.0,
+        wandb_config: Optional[Any],
+        run_name: Optional[str],
+        # Dataset
+        node2emb: Dict[int, torch.Tensor],
+        rel2idx: Dict[str, int],
+        edge_index_raw: List[Tuple[int, int, str]],
+        train_batch_size: int = 256,
+        eval_batch_size: int = 256,
+        # Learning environment
+        device: str = "cpu",
+        # Reproduction
+        seed: int = 42,
+        train_ratio: float = 0.90,
+        # LR management
+        lr: float = 0.0001,
+        lr_decay: float = 1.0,
+        lr_scheduler: str = "linear",
+        # Architecture spec
+        scorer_type: str = "distmult",
+        gat_out_dim: int = 200,
+        gat_heads: int = 6,
+        gat_num_layers: int = 1,
+        dropout: float = 0.2,
+        rel_attn_dropout: float = 0.0,
+        architecture_name: Optional[str] = None,
+        base_model_name: Optional[str] = None,
+        # Storage
+        max_checkpoints: int = 5,
+        out_dir: Optional[str] = None,
+        num_neg: int = 4,
+
         # weight_decay: float = 0.0,
         # grad_clip_norm: Optional[float] = None,
         # early_stop_patience: Optional[int] = None,
         # use_amp: bool = False,
-        seed: int = 42,
-        max_checkpoints: int = 5,
-        # lr: float = 0.0001,
-        # lr_decay: float = 1.0,
         # log_grad_norm: bool = False,
         # disable_edge_type_mask: bool = False,
+        # self_adv_alpha: float = 1.0,
         # profile_steps: int = 0,
-        # device: Optional[torch.device] = None,
-        # run_name: Optional[str] = None,
         # log_every_n_steps: int = 100,
-        out_dir: Optional[str] = None,  # OK
         # save_every_n_steps: Optional[int] = None,
         # eval_every_n_steps: Optional[int] = None,
         # use_self_adv_neg: bool = False,
-        # self_adv_alpha: float = 1.0,
-
     ):
         AnyReproductiveTrainerI.__init__(self, seed=seed, run_config=run_config)
-        RelGATTrainerBaseStorageI.__init__(
-            self, out_dir=out_dir, max_checkpoints=max_checkpoints, run_config=run_config
+        AnyModelArchitectureConstructorI.__init__(
+            self,
+            gat_out_dim=gat_out_dim,
+            gat_heads=gat_heads,
+            gat_num_layers=gat_num_layers,
+            dropout=dropout,
+            dropout_rel_attention=rel_attn_dropout,
+            scorer_type=scorer_type,
+            architecture_name=architecture_name,
+            base_model_name=base_model_name,
+            run_config=run_config,
+        )
+        AnyLRTrainerI.__init__(
+            self,
+            lr=lr,
+            lr_scheduler=lr_scheduler,
+            lr_decay=lr_decay,
+            run_config=run_config,
+        )
+        AnyRelGATModelDatasetI.__init__(
+            self,
+            device=device,
+            node2emb=node2emb,
+            rel2idx=rel2idx,
+            edge_index_raw=edge_index_raw,
+            train_ratio=train_ratio,
+            num_neg=num_neg,
+            train_batch_size=train_batch_size,
+            eval_batch_size=eval_batch_size,
+            run_config=run_config,
         )
 
+        RelGATTrainerBaseStorageI.__init__(
+            self,
+            out_dir=out_dir,
+            max_checkpoints=max_checkpoints,
+            run_config=run_config,
+        )
+
+        # Training environment
+        self.run_config = run_config
+        self.wandb_config = wandb_config
+
+        self.device = str(run_config.get("device", device))
+        self.run_name = str(run_config["run_name"], run_name)
+
+        ####################################################################################################
         self._no_improve_steps = 0
         self.log_grad_norm = log_grad_norm
         self.weight_decay = weight_decay
@@ -76,43 +137,19 @@ class RelGATTrainer(AnyReproductiveTrainerI, RelGATTrainerBaseStorageI):
         else:
             self.scaler = None
 
-        self.lr_decay = lr_decay
         self.grad_clip_norm = grad_clip_norm
         self.profile_steps = profile_steps
         self.early_stop_patience = early_stop_patience
-        self.max_checkpoints = max_checkpoints
         self.disable_edge_type_mask = disable_edge_type_mask
-
         self.use_self_adv_neg = bool(use_self_adv_neg)
         self.self_adv_alpha = float(self_adv_alpha)
 
         # Model saving – list of best checkpoints
         self.best_mrr = -float("inf")
 
-        self.device = device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-        self.train_batch_size = train_batch_size
-        self.num_neg = num_neg
-        self.scorer_type = scorer_type
-        self.gat_out_dim = gat_out_dim
-        self.gat_heads = gat_heads
-        self.dropout = dropout
-        self.rel_attn_dropout = rel_attn_dropout
-        self.run_name = run_name
-        self.gat_num_layers = gat_num_layers
-
         # Logging
         self.global_step = 0
         self.log_every_n_steps = max(1, int(log_every_n_steps))
-
-        # LR/scheduler config
-        self.scheduler = None
-        self.base_lr = lr
-        self.scheduler_type = str(run_config["lr_scheduler"]).lower()
-        self.default_warmup_ratio = (
-            ConstantsRelGATTrainer.Default.DEFAULT_WARMUP_RATIO
-        )
 
         # Model saving
         self.save_every_n_steps = (
@@ -126,84 +163,9 @@ class RelGATTrainer(AnyReproductiveTrainerI, RelGATTrainerBaseStorageI):
             if eval_every_n_steps is not None and int(eval_every_n_steps) > 0
             else None
         )
+        ####################################################################################################
 
-        # Dataset and dataset division
-        self.node2emb = node2emb
-        self.rel2idx = rel2idx
-        self.edge_index_raw = edge_index_raw
-        self.all_node_ids = sorted(node2emb.keys())
-
-        # Embeddings id to proper idx
-        self.id2idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
-
-        self.node_emb_matrix = torch.stack(
-            [torch.as_tensor(self.node2emb[nid]) for nid in self.all_node_ids], dim=0
-        ).to(self.device)
-
-        # random division of edges to train/test
-        random.shuffle(self.edge_index_raw)
-        n_edges = len(self.edge_index_raw)
-        n_train = int(train_ratio * n_edges)
-
-        # Remap edges on compact indexes
-        def _map_edge(e):
-            s, d, r = e
-            return self.id2idx[s], self.id2idx[d], r
-
-        mapped_edges = [_map_edge(e) for e in self.edge_index_raw]
-        self.train_edges = mapped_edges[:n_train]
-        self.eval_edges = mapped_edges[n_train:]
-
-        print(f"Number of edges (relations): {n_edges}")
-        print(f" - train: {len(self.train_edges)} ({train_ratio*100:.1f} %)")
-        print(f" - eval: {len(self.eval_edges)} ({100-train_ratio*100:.1f} %)")
-
-        # Dataset / DataLoader
-        self.train_dataset = EdgeDataset(
-            edge_index=self.train_edges,
-            node2emb=self.node2emb,
-            rel2idx=self.rel2idx,
-            num_neg=self.num_neg,
-            all_node_ids=list(range(len(self.all_node_ids))),
-        )
-        self.eval_dataset = EdgeDataset(
-            edge_index=self.eval_edges,
-            node2emb=self.node2emb,
-            rel2idx=self.rel2idx,
-            num_neg=self.num_neg,
-            all_node_ids=list(range(len(self.all_node_ids))),
-        )
-
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=self.train_batch_size,
-            shuffle=True,
-            num_workers=0,
-            collate_fn=lambda batch: batch,
-        )
-        self.eval_loader = DataLoader(
-            self.eval_dataset,
-            batch_size=self.train_batch_size,
-            shuffle=False,
-            num_workers=0,
-            collate_fn=lambda batch: batch,
-        )
-
-        # Mapping lu from triples on compact indexe
-        train_src_list, train_dst_list, train_rel_list = zip(*self.train_edges)
-        self.edge_index = torch.tensor(
-            [train_src_list, train_dst_list], dtype=torch.long
-        ).to(self.device)
-        self.edge_type = torch.tensor(
-            [
-                self.rel2idx[r] if isinstance(r, str) else int(r)
-                for r in train_rel_list
-            ],
-            dtype=torch.long,
-        ).to(self.device)
-        self.num_rel = len(self.rel2idx)
-
-        # Model + optimizer
+        # Model
         self.model = RelGATModel(
             node_emb=self.node_emb_matrix,
             edge_index=self.edge_index,
@@ -213,10 +175,11 @@ class RelGATTrainer(AnyReproductiveTrainerI, RelGATTrainerBaseStorageI):
             gat_out_dim=self.gat_out_dim,
             gat_heads=self.gat_heads,
             dropout=self.dropout,
-            relation_attn_dropout=self.rel_attn_dropout,
+            relation_attn_dropout=self.dropout_rel_attention,
             gat_num_layers=self.gat_num_layers,
         ).to(self.device)
 
+        # Optimizer
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=self.base_lr,
@@ -224,39 +187,13 @@ class RelGATTrainer(AnyReproductiveTrainerI, RelGATTrainerBaseStorageI):
         )
 
         # W&B initialization
-        self.wandb_config = wandb_config
-        self.run_config = run_config
-        # keep logging freq in run config for reproducibility/visibility
-        self.run_config["log_every_n_steps"] = self.log_every_n_steps
-        # ensure lr and scheduler info are present in run config (for reproducibility)
-        self.run_config["lr"] = self.base_lr
-        self.run_config["lr_scheduler"] = self.scheduler_type
-        self.run_config["use_self_adv_neg"] = self.use_self_adv_neg
-        self.run_config["self_adv_alpha"] = self.self_adv_alpha
-        #
-        self.run_config["save_every_n_steps"] = self.save_every_n_steps
-        self.run_config["save_dir"] = str(self.save_dir)
-        WanDBHandler.init_wandb(
-            wandb_config=self.wandb_config,
-            run_config=self.run_config,
-            training_args=None,
-            run_name=self.run_name,
-        )
-
-    # Helper methods (loss, ranking, evaluation)
-    @staticmethod
-    def compute_mrr_hits(
-        scores: torch.Tensor, true_idx: int = 0, ks: Tuple[int, ...] = (1, 3, 10)
-    ):
-        # Zabezpieczenie: NaN/±inf traktujemy jako "bardzo słabe" wyniki,
-        # by nie windowały MRR do 1.0
-        s = torch.nan_to_num(scores, nan=-1e9, neginf=-1e9, posinf=1e9)
-        if not torch.isfinite(s[true_idx]):
-            s[true_idx] = -1e9
-        rank = (s > s[true_idx]).sum().item() + 1
-        mrr = 1.0 / max(1, rank)
-        hits = {k: 1.0 if rank <= k else 0.0 for k in ks}
-        return mrr, hits
+        if self.wandb_config is not None:
+            WanDBHandler.init_wandb(
+                wandb_config=self.wandb_config,
+                run_config=self.run_config,
+                training_args=None,
+                run_name=self.run_name,
+            )
 
     def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
         self.model.eval()
@@ -687,8 +624,9 @@ class RelGATTrainer(AnyReproductiveTrainerI, RelGATTrainerBaseStorageI):
                     ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
                     self.rel2idx,
                 ),
-            ]
+            ],
         )
+
     #     out_dir = self.save_dir / subdir
     #     out_dir.mkdir(parents=True, exist_ok=True)
     #     out_path = out_dir / ConstantsRelGATTrainer.Default.OUT_MODEL_NAME

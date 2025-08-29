@@ -12,9 +12,16 @@ from relgat_llm.base.constants import ConstantsRelGATTrainer
 
 
 class RelGATTrainerBaseStorageI(abc.ABC):
-    def __init__(self, out_dir: str, run_config: Dict[str, Any], max_checkpoints: Optional[int] = None):
+    def __init__(
+        self,
+        out_dir: str,
+        run_config: Dict[str, Any],
+        max_checkpoints: Optional[int] = None,
+    ):
         self.out_dir = str(run_config.get("out_dir", out_dir))
-        self.max_checkpoints = int(run_config.get("max_checkpoints", max_checkpoints))
+        self.max_checkpoints = int(
+            run_config.get("max_checkpoints", max_checkpoints)
+        )
 
         # Fifo queue
         self.best_ckpt_dir: Path | None = None
@@ -27,8 +34,9 @@ class RelGATTrainerBaseStorageI(abc.ABC):
         )
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
-
-    def _save_model_and_files(self, subdir: str, model, files: List[Tuple[str, Dict[Any, Any]]]) -> str:
+    def _save_model_and_files(
+        self, subdir: str, model, files: List[Tuple[str, Dict[Any, Any]]]
+    ) -> str:
         out_dir = self.save_dir / subdir
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / ConstantsRelGATTrainer.Default.OUT_MODEL_NAME

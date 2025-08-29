@@ -3,7 +3,8 @@ import torch
 import torch.nn.functional as F
 
 
-class RelGATLoss(torch.nn.Module):
+class RelGATLoss:
+
     @staticmethod
     def margin_ranking_loss(
         pos_score: torch.Tensor, neg_score: torch.Tensor, margin: float = 1.0

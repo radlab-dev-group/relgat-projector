@@ -12,8 +12,8 @@ MAX_CHECKPOINTS=5
 # Ratio of training data
 TRAIN_EVAL_DATASET_RATIO="0.90"
 
-# Which architecture will be trained {small, medium, large}
-ARCHITECTURE="small"
+# Which architecture will be trained {small, medium, medium}
+ARCHITECTURE="medium"
 
 # =============================================================================
 # =============================================================================
@@ -38,9 +38,9 @@ elif [[ "${ARCHITECTURE}" == "medium" ]]
 then
   EPOCHS=40
   BATCH_SIZE=256
-  NUM_NEG_TO_POS=16
+  NUM_NEG_TO_POS=10
 
-  LEARNING_RATE=0.00008
+  LEARNING_RATE=0.00007
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=3
