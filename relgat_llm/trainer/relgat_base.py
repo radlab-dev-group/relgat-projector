@@ -20,6 +20,14 @@ from relgat_llm.trainer.core.relgat_dataset import AnyRelGATModelDatasetI
 from relgat_llm.trainer.core.any_storage_trainer import RelGATTrainerBaseStorageI
 from relgat_llm.trainer.core.any_architecture import AnyModelArchitectureConstructorI
 
+# ... existing code ...
+from relgat_llm.trainer.components.batching import concat_pos_negs_to_tensors
+from relgat_llm.trainer.components.losses import prepare_scores_and_compute_loss
+from relgat_llm.trainer.components.grad import compute_total_grad_norm
+from relgat_llm.trainer.components.logging_adapter import LoggerAdapter
+
+# ... existing code ...
+
 
 class RelGATTrainer(
     AnyReproductiveTrainerI,
@@ -197,7 +205,7 @@ class RelGATTrainer(
             weight_decay=self.weight_decay,
         )
 
-        # W&B initialization
+        # W&B initialization (kept identical)
         if self.wandb_config is not None:
             WanDBHandler.init_wandb(
                 wandb_config=self.wandb_config,
@@ -222,19 +230,12 @@ class RelGATTrainer(
 
                 pos, *negs = zip(*batch)
 
-                src_ids = torch.cat(
-                    [p[0] for p in pos] + [n[0] for n in sum(negs, ())], dim=0
-                ).to(self.device)
-                rel_ids = torch.cat(
-                    [p[1] for p in pos] + [n[1] for n in sum(negs, ())], dim=0
-                ).to(self.device)
-                dst_ids = torch.cat(
-                    [p[2] for p in pos] + [n[2] for n in sum(negs, ())], dim=0
-                ).to(self.device)
+                src_ids, rel_ids, dst_ids, B = concat_pos_negs_to_tensors(
+                    pos, negs, device=self.device
+                )
 
                 scores = self.model(src_ids, rel_ids, dst_ids)  # [B*(1+num_neg)]
 
-                # Zabezpieczenie: policz i napraw niefinity
                 nonfinite = (~torch.isfinite(scores)).sum().item()
                 if nonfinite > 0:
                     WanDBHandler.log_metrics(
@@ -244,22 +245,17 @@ class RelGATTrainer(
                         scores, nan=0.0, neginf=-1e9, posinf=1e9
                     )
 
-                B = len(pos)
                 pos_score = scores[:B]
                 neg_score = scores[B:].view(B, self.num_neg)
 
-                # Loss policz na klamrowanych wartościach
-                pos_s = pos_score.clamp(-20.0, 20.0)
-                neg_s = neg_score.clamp(-20.0, 20.0)
-
-                if self.use_self_adv_neg:
-                    batch_loss = RelGATLoss.self_adversarial_loss(
-                        pos_s, neg_s, alpha=self.self_adv_alpha
-                    )
-                else:
-                    batch_loss = RelGATLoss.margin_ranking_loss(
-                        pos_s, neg_s, margin=1.0
-                    )
+                batch_loss = prepare_scores_and_compute_loss(
+                    pos_score=pos_score,
+                    neg_score=neg_score,
+                    use_self_adv_neg=self.use_self_adv_neg,
+                    self_adv_alpha=self.self_adv_alpha,
+                    margin=1.0,
+                    clamp_limit=20.0,
+                )
 
                 total_loss += batch_loss.item() * B
                 total_pos += B
@@ -268,7 +264,6 @@ class RelGATTrainer(
                     cand_scores = torch.cat(
                         [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
                     )
-                    # compute_mrr_hits już sanetyzuje
                     mrr, hits = RelgatEval.compute_mrr_hits(
                         cand_scores, true_idx=0, ks=ks
                     )
@@ -281,7 +276,6 @@ class RelGATTrainer(
         avg_mrr = total_mrr / n_examples
         avg_hits = {k: total_hits[k] / n_examples for k in ks}
 
-        # average eval loss on positive example
         avg_eval_loss = total_loss / max(1, total_pos)
 
         return avg_mrr, avg_hits, avg_eval_loss
@@ -323,7 +317,6 @@ class RelGATTrainer(
 
             if self.eval_every_n_steps is None:
                 avg_train_loss = epoch_loss / len(self.train_dataset)
-                # ----------------- EVAL -----------------
                 mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
                 hits_str = ", ".join(
                     [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
@@ -333,7 +326,6 @@ class RelGATTrainer(
                     f"   - eval – loss: {eval_loss:.4f} | "
                     f"MRR: {mrr:.4f} | {hits_str}"
                 )
-                # ----------------- LOG TO W&B -----------------
                 WanDBHandler.log_metrics(
                     metrics={
                         "epoch": epoch,
@@ -347,7 +339,6 @@ class RelGATTrainer(
                     step=self.global_step,
                 )
 
-        # ----------------- SAVE FINAL MODEL  -----------------
         out_model_dir = (
             f"relgat_{self.scorer_type}"
             f"_ratio{int(self.run_config['train_ratio'] * 100)}"
@@ -355,8 +346,6 @@ class RelGATTrainer(
         self._save_checkpoint(subdir=out_model_dir)
         print(f"\nTraining finished – model saved to: {out_model_dir}")
 
-        # ----------------- ARTIFACT W&B -----------------
-        # WanDBHandler.add_model(name=f"relgat-{self.scorer_type}", local_path="..")
         WanDBHandler.finish_wand()
 
     def single_epoch(
@@ -378,17 +367,10 @@ class RelGATTrainer(
             step_start = time.time()
             pos, *negs = zip(*batch)
 
-            src_ids = torch.cat(
-                [p[0] for p in pos] + [n[0] for n in sum(negs, ())], dim=0
-            ).to(self.device)
-            rel_ids = torch.cat(
-                [p[1] for p in pos] + [n[1] for n in sum(negs, ())], dim=0
-            ).to(self.device)
-            dst_ids = torch.cat(
-                [p[2] for p in pos] + [n[2] for n in sum(negs, ())], dim=0
-            ).to(self.device)
+            src_ids, rel_ids, dst_ids, B = concat_pos_negs_to_tensors(
+                pos, negs, device=self.device
+            )
 
-            # use auto casting
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 self.optimizer.zero_grad(set_to_none=True)
                 scores = self.model(src_ids, rel_ids, dst_ids)
@@ -402,18 +384,17 @@ class RelGATTrainer(
                         scores, nan=0.0, neginf=-1e9, posinf=1e9
                     )
 
-                B = len(pos)
-                pos_score = scores[:B].clamp(-20.0, 20.0)
-                neg_score = scores[B:].view(B, self.num_neg).clamp(-20.0, 20.0)
+                pos_score = scores[:B]
+                neg_score = scores[B:].view(B, self.num_neg)
 
-                if self.use_self_adv_neg:
-                    loss = RelGATLoss.self_adversarial_loss(
-                        pos_score, neg_score, alpha=self.self_adv_alpha
-                    )
-                else:
-                    loss = RelGATLoss.margin_ranking_loss(
-                        pos_score, neg_score, margin=self.margin
-                    )
+                loss = prepare_scores_and_compute_loss(
+                    pos_score=pos_score,
+                    neg_score=neg_score,
+                    use_self_adv_neg=self.use_self_adv_neg,
+                    self_adv_alpha=self.self_adv_alpha,
+                    margin=self.margin,
+                    clamp_limit=20.0,
+                )
 
             if not torch.isfinite(loss):
                 WanDBHandler.log_metrics(
@@ -423,13 +404,11 @@ class RelGATTrainer(
                 self.optimizer.zero_grad(set_to_none=True)
                 break
 
-            # scaler backward if enabled
             if self.use_amp:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            # gradient clipping (if enabled)
             if self.grad_clip_norm is not None:
                 if self.use_amp:
                     self.scaler.unscale_(self.optimizer)
@@ -438,39 +417,29 @@ class RelGATTrainer(
                     max_norm=self.grad_clip_norm,
                 )
 
-            # optimizer step
             if self.use_amp:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 self.optimizer.step()
 
-            # step scheduler after optimizer step
             if self.scheduler is not None:
                 self.scheduler.step()
 
-            # loss accumulation
             loss_item = loss.item()
             epoch_loss += loss_item * B
             running_loss += loss_item * B
             running_examples += B
 
-            # global step and logging at every N steps
             self.global_step += 1
 
-            # logging every n steps
             if self.global_step % self.log_every_n_steps == 0:
                 step_end = time.time()
                 step_time = step_end - step_start
 
                 grad_norm = -float("inf")
                 if self.log_grad_norm:
-                    total_norm = 0.0
-                    for p in self.model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.detach().data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    grad_norm = total_norm**0.5
+                    grad_norm = compute_total_grad_norm(self.model)
 
                 avg_running_loss = running_loss / max(1, running_examples)
                 current_lr = (
@@ -496,27 +465,33 @@ class RelGATTrainer(
                         "train/lr": current_lr,
                         "train/step_time": step_time,
                         "train/pos_score_mean": (
-                            pos_score.detach().mean().item() if B > 0 else 0.0
+                            (scores[:B].detach().clamp(-20.0, 20.0)).mean().item()
+                            if B > 0
+                            else 0.0
                         ),
                         "train/neg_score_mean": (
-                            neg_score.detach().mean().item()
-                            if neg_score.numel() > 0
+                            (
+                                scores[B:]
+                                .view(B, self.num_neg)
+                                .detach()
+                                .clamp(-20.0, 20.0)
+                            )
+                            .mean()
+                            .item()
+                            if (scores.numel() - B) > 0
                             else 0.0
                         ),
                     },
                     step=self.global_step,
                 )
-                # reset counters
                 running_loss = 0.0
                 running_examples = 0
 
-            # Eval model every n steps
             if (
                 self.eval_every_n_steps is not None
                 and self.global_step % self.eval_every_n_steps == 0
             ):
                 avg_train_loss = epoch_loss / len(self.train_dataset)
-                # ----------------- EVAL -----------------
                 mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
                 hits_str = ", ".join(
                     [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
@@ -529,7 +504,6 @@ class RelGATTrainer(
                     f"   - eval – loss: {eval_loss:.4f} |"
                     f" MRR: {mrr:.4f} | {hits_str}"
                 )
-                # ----------------- LOG TO W&B -----------------
                 WanDBHandler.log_metrics(
                     metrics={
                         "epoch": epoch,
@@ -542,7 +516,6 @@ class RelGATTrainer(
                     step=self.global_step,
                 )
 
-                # Save
                 current_mrr = mrr
                 if current_mrr > self.best_mrr:
                     self.best_mrr = current_mrr
@@ -554,7 +527,6 @@ class RelGATTrainer(
                         self._save_checkpoint(subdir=self.best_ckpt_dir)
                         self._prune_checkpoints()
 
-                        # log saved checkpoint to w&b
                         WanDBHandler.log_metrics(
                             metrics={"checkpoint/step": self.global_step},
                             step=self.global_step,

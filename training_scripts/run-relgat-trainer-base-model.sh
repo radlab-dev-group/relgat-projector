@@ -13,7 +13,7 @@ MAX_CHECKPOINTS=5
 TRAIN_EVAL_DATASET_RATIO="0.90"
 
 # Which architecture will be trained {small, medium, medium}
-ARCHITECTURE="medium"
+ARCHITECTURE="small"
 
 # =============================================================================
 # =============================================================================
@@ -21,7 +21,7 @@ ARCHITECTURE="medium"
 # =============================================================================
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
-  EPOCHS=30
+  EPOCHS=5
   BATCH_SIZE=512
   NUM_NEG_TO_POS=8
 
