@@ -53,6 +53,12 @@ class RelGATMainTrainerHandler:
             "train_ratio": args.train_ratio,
             "device": args.device,
             "run_name": args.run_name,
+            "train_batch_size": args.batch_size,
+            "eval_batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "warmup_steps": args.warmup_steps,
+            "margin": args.margin,
+            "early_stop_patience": args.early_stop_patience,
             # Architecture specification
             "scorer_type": args.scorer,
             "gat_out_dim": args.gat_out_dim,
@@ -70,29 +76,28 @@ class RelGATMainTrainerHandler:
             "out_dir": args.save_dir,
             "max_checkpoints": args.max_checkpoints,
             "num_neg": args.num_neg,
-
-            # "epochs": args.epochs,
-            # "batch_size": args.batch_size,
-            # "log_every_n_steps": args.log_every_n_steps,
-            # "save_every_n_steps": args.save_every_n_steps,
-            # "eval_every_n_steps": args.eval_every_n_steps,
-            # "warmup_steps": args.warmup_steps,
-            # "weight_decay": args.weight_decay,
-            # "grad_clip_norm": args.grad_clip_norm,
-            # "early_stop_patience": args.early_stop_patience,
-            # "use_amp": args.use_amp,
-            # "disable_edge_type_mask": args.disable_edge_type_mask,
-            # "use_self_adv_neg": args.use_self_adv_neg,
-            # "self_adv_alpha": args.self_adv_alpha,
+            # Logging
+            "log_every_n_steps": args.log_every_n_steps,
+            # Training n-steps
+            "save_every_n_steps": args.save_every_n_steps,
+            "eval_every_n_steps": args.eval_every_n_steps,
+            # Additional training args
+            "use_amp": args.use_amp,
+            "disable_edge_type_mask": args.disable_edge_type_mask,
+            "use_self_adv_neg": args.use_self_adv_neg,
+            "self_adv_alpha": args.self_adv_alpha,
+            "weight_decay": args.weight_decay,
+            "grad_clip_norm": args.grad_clip_norm,
         }
 
         trainer = RelGATTrainer(
             node2emb=node2emb,
             rel2idx=rel2idx,
             edge_index_raw=edge_index_raw,
-            train_batch_size=run_cfg["batch_size"],
-            eval_batch_size=run_cfg["batch_size"],
+            train_batch_size=run_cfg["train_batch_size"],
+            eval_batch_size=run_cfg["eval_batch_size"],
             num_neg=run_cfg["num_neg"],
+            early_stop_patience=run_cfg["early_stop_patience"],
             # Whole config
             run_config=run_cfg,
             run_name=run_cfg["run_name"],
@@ -116,19 +121,19 @@ class RelGATMainTrainerHandler:
             # Storage
             out_dir=run_cfg["out_dir"],
             max_checkpoints=run_cfg["max_checkpoints"],
-
             # train_ratio=run_cfg["train_ratio"],
-            # log_every_n_steps=run_cfg["log_every_n_steps"],
-            # save_every_n_steps=run_cfg["save_every_n_steps"],
-            # eval_every_n_steps=run_cfg["eval_every_n_steps"],
-            # weight_decay=run_cfg["weight_decay"],
-            # grad_clip_norm=run_cfg["grad_clip_norm"],
-            # early_stop_patience=run_cfg["early_stop_patience"],
-            # use_amp=run_cfg["use_amp"],
-            # log_grad_norm=True,
-            # disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
-            # profile_steps=run_cfg["log_every_n_steps"],
-            # use_self_adv_neg=run_cfg["use_self_adv_neg"],
-            # self_adv_alpha=run_cfg["self_adv_alpha"],
+            # N-step
+            save_every_n_steps=run_cfg["save_every_n_steps"],
+            eval_every_n_steps=run_cfg["eval_every_n_steps"],
+            # Logging
+            log_grad_norm=True,
+            log_every_n_steps=run_cfg["log_every_n_steps"],
+            # Additional params
+            use_amp=run_cfg["use_amp"],
+            weight_decay=run_cfg["weight_decay"],
+            grad_clip_norm=run_cfg["grad_clip_norm"],
+            disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
+            use_self_adv_neg=run_cfg["use_self_adv_neg"],
+            self_adv_alpha=run_cfg["self_adv_alpha"],
         )
         return trainer

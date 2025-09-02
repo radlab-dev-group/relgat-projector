@@ -2,13 +2,10 @@ import abc
 import torch
 import random
 
-import numpy as np
-
 from torch.utils.data import DataLoader
-from typing import Tuple, List, Any, Dict, Optional
+from typing import Tuple, List, Any, Dict
 
 from relgat_llm.dataset.edge import EdgeDataset
-from relgat_llm.base.constants import ConstantsRelGATTrainer
 
 
 class AnyRelGATModelDatasetI(abc.ABC):
@@ -82,12 +79,15 @@ class AnyRelGATModelDatasetI(abc.ABC):
         def _map_edge(e):
             s, d, r = e
             return self.id2idx[s], self.id2idx[d], r
+
         mapped_edges = [_map_edge(e) for e in self.edge_index_raw]
         self.train_edges = mapped_edges[:n_train]
         self.eval_edges = mapped_edges[n_train:]
         print(f"Number of edges (relations): {n_edges}")
         print(f" - train: {len(self.train_edges)} ({self.train_ratio * 100:.1f} %)")
-        print(f" - eval: {len(self.eval_edges)} ({100 - self.train_ratio * 100:.1f} %)")
+        print(
+            f" - eval: {len(self.eval_edges)} ({100 - self.train_ratio * 100:.1f} %)"
+        )
 
     def _prepare_loaders(self):
         # Dataset / DataLoader
@@ -137,4 +137,3 @@ class AnyRelGATModelDatasetI(abc.ABC):
             ],
             dtype=torch.long,
         ).to(self.device)
-
