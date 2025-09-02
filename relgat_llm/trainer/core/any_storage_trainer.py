@@ -24,7 +24,7 @@ class RelGATTrainerBaseStorageI(abc.ABC):
         )
 
         # Fifo queue
-        self.best_ckpt_dir: Path | None = None
+        self.best_ckpt_dir: Path | str | None = None
         self.saved_checkpoints: deque[Path] = deque()
 
         self.save_dir = Path(
