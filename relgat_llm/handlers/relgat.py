@@ -3,8 +3,8 @@ import torch
 import pickle
 import argparse
 
-from relgat_llm.trainer.relgat_base import RelGATTrainer
 from relgat_llm.base.constants import ConstantsRelGATTrainer
+from relgat_llm.trainer.relgat_base import RelGATTrainer
 
 
 class RelGATMainTrainerHandler:
@@ -48,71 +48,91 @@ class RelGATMainTrainerHandler:
         args: argparse.Namespace,
     ) -> RelGATTrainer:
         run_cfg = {
-            "base_model": "relgat",
+            # Reproduction
+            "seed": args.seed,
             "train_ratio": args.train_ratio,
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "scorer": args.scorer,
-            "out_dim": args.gat_out_dim,
-            "num_neg": args.num_neg,
-            "heads": args.heads,
-            "num_layers": args.gat_num_layers,
-            "dropout": args.dropout,
             "device": args.device,
-            "log_every_n_steps": args.log_every_n_steps,
-            "out_dir": args.save_dir,
-            "save_every_n_steps": args.save_every_n_steps,
-            "eval_every_n_steps": args.eval_every_n_steps,
+            "run_name": args.run_name,
+            "train_batch_size": args.batch_size,
+            "eval_batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "warmup_steps": args.warmup_steps,
+            "margin": args.margin,
+            "early_stop_patience": args.early_stop_patience,
+            # Architecture specification
+            "scorer_type": args.scorer,
+            "gat_out_dim": args.gat_out_dim,
+            "gat_heads": args.heads,
+            "gat_num_layers": args.gat_num_layers,
+            "dropout": args.dropout,
+            "dropout_rel_attention": args.dropout_rel_attention,
+            "architecture_name": args.architecture,
+            "base_model_name": "relgat",
+            # Larning rate management
             "lr": args.lr,
             "lr_scheduler": args.lr_scheduler,
-            "weight_decay": args.weight_decay,
-            "grad_clip_norm": args.grad_clip_norm,
-            "early_stop_patience": args.early_stop_patience,
-            "use_amp": args.use_amp,
-            "seed": args.seed,
-            "max_checkpoints": args.max_checkpoints,
             "lr_decay": args.lr_decay,
+            # Storage management
+            "out_dir": args.save_dir,
+            "max_checkpoints": args.max_checkpoints,
+            "num_neg": args.num_neg,
+            # Logging
+            "log_every_n_steps": args.log_every_n_steps,
+            # Training n-steps
+            "save_every_n_steps": args.save_every_n_steps,
+            "eval_every_n_steps": args.eval_every_n_steps,
+            # Additional training args
+            "use_amp": args.use_amp,
             "disable_edge_type_mask": args.disable_edge_type_mask,
             "use_self_adv_neg": args.use_self_adv_neg,
             "self_adv_alpha": args.self_adv_alpha,
-            "dropout_rel_attention": args.dropout_rel_attention,
-            "architecture": args.architecture,
+            "weight_decay": args.weight_decay,
+            "grad_clip_norm": args.grad_clip_norm,
         }
-        if args.warmup_steps is not None:
-            run_cfg["warmup_steps"] = args.warmup_steps
 
         trainer = RelGATTrainer(
             node2emb=node2emb,
             rel2idx=rel2idx,
             edge_index_raw=edge_index_raw,
-            run_config=run_cfg,
-            wandb_config=ConstantsRelGATTrainer.WandbConfig,
-            train_batch_size=run_cfg["batch_size"],
+            train_batch_size=run_cfg["train_batch_size"],
+            eval_batch_size=run_cfg["eval_batch_size"],
             num_neg=run_cfg["num_neg"],
+            early_stop_patience=run_cfg["early_stop_patience"],
+            # Whole config
+            run_config=run_cfg,
+            run_name=run_cfg["run_name"],
+            wandb_config=ConstantsRelGATTrainer.WandbConfig,
+            device=run_cfg["device"],
+            # Reproduction
+            seed=run_cfg["seed"],
             train_ratio=run_cfg["train_ratio"],
-            scorer_type=run_cfg["scorer"],
-            gat_out_dim=run_cfg["out_dim"],
-            gat_heads=run_cfg["heads"],
-            gat_num_layers=run_cfg["num_layers"],
+            # Larning rate management
+            lr=run_cfg["lr"],
+            lr_decay=run_cfg["lr_decay"],
+            lr_scheduler=run_cfg["lr_scheduler"],
+            # Architecture specification
+            scorer_type=run_cfg["scorer_type"],
+            gat_out_dim=run_cfg["gat_out_dim"],
+            gat_heads=run_cfg["gat_heads"],
+            gat_num_layers=run_cfg["gat_num_layers"],
             dropout=run_cfg["dropout"],
             rel_attn_dropout=run_cfg["dropout_rel_attention"],
-            run_name=args.run_name,
-            device=torch.device(run_cfg["device"]),
-            log_every_n_steps=run_cfg["log_every_n_steps"],
-            save_dir=run_cfg["out_dir"],
+            architecture_name=run_cfg["architecture_name"],
+            # Storage
+            out_dir=run_cfg["out_dir"],
+            max_checkpoints=run_cfg["max_checkpoints"],
+            # train_ratio=run_cfg["train_ratio"],
+            # N-step
             save_every_n_steps=run_cfg["save_every_n_steps"],
             eval_every_n_steps=run_cfg["eval_every_n_steps"],
+            # Logging
+            log_grad_norm=True,
+            log_every_n_steps=run_cfg["log_every_n_steps"],
+            # Additional params
+            use_amp=run_cfg["use_amp"],
             weight_decay=run_cfg["weight_decay"],
             grad_clip_norm=run_cfg["grad_clip_norm"],
-            early_stop_patience=run_cfg["early_stop_patience"],
-            use_amp=run_cfg["use_amp"],
-            seed=run_cfg["seed"],
-            max_checkpoints=run_cfg["max_checkpoints"],
-            lr_decay=run_cfg["lr_decay"],
-            lr=run_cfg["lr"],
-            log_grad_norm=True,
             disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
-            profile_steps=run_cfg["log_every_n_steps"],
             use_self_adv_neg=run_cfg["use_self_adv_neg"],
             self_adv_alpha=run_cfg["self_adv_alpha"],
         )

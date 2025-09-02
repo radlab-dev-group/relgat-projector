@@ -329,10 +329,7 @@ def main() -> None:
         args=args,
     )
 
-    trainer.train(
-        epochs=args.epochs,
-        margin=args.margin,
-    )
+    trainer.train(epochs=args.epochs)
 
 
 if __name__ == "__main__":
