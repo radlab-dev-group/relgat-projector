@@ -121,7 +121,10 @@ class RelGATTrainer(
         self.wandb_config = wandb_config
 
         self.device = str(run_config.get("device", device))
-        self.run_name = str(run_config.get("run_name"), run_name)
+        self.run_name = run_config.get("run_name", run_name)
+        if self.run_name is None:
+            self.run_name = architecture_name
+
         self.warmup_steps = run_config.get("warmup_steps", warmup_steps)
         self.margin = float(run_config.get("margin", margin))
         self.log_grad_norm = log_grad_norm
