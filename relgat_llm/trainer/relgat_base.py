@@ -216,6 +216,7 @@ class RelGATTrainer(
 
     def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
         self.model.eval()
+
         total_mrr = 0.0
         total_hits = {k: 0.0 for k in ks}
         n_examples = 0
@@ -234,19 +235,10 @@ class RelGATTrainer(
                     pos, negs, device=self.device
                 )
 
-                scores = self.model(src_ids, rel_ids, dst_ids)  # [B*(1+num_neg)]
-
-                nonfinite = (~torch.isfinite(scores)).sum().item()
-                if nonfinite > 0:
-                    WanDBHandler.log_metrics(
-                        {"eval/nonfinite_scores": nonfinite}, step=self.global_step
-                    )
-                    scores = torch.nan_to_num(
-                        scores, nan=0.0, neginf=-1e9, posinf=1e9
-                    )
-
-                pos_score = scores[:B]
-                neg_score = scores[B:].view(B, self.num_neg)
+                scores = self._forward_scores(
+                    src_ids, rel_ids, dst_ids, phase="eval"
+                )  # [B*(1+num_neg)]
+                pos_score, neg_score = self._split_scores(scores, B)
 
                 batch_loss = prepare_scores_and_compute_loss(
                     pos_score=pos_score,
@@ -275,7 +267,6 @@ class RelGATTrainer(
         n_examples = max(1, n_examples)
         avg_mrr = total_mrr / n_examples
         avg_hits = {k: total_hits[k] / n_examples for k in ks}
-
         avg_eval_loss = total_loss / max(1, total_pos)
 
         return avg_mrr, avg_hits, avg_eval_loss
@@ -317,27 +308,13 @@ class RelGATTrainer(
 
             if self.eval_every_n_steps is None:
                 avg_train_loss = epoch_loss / len(self.train_dataset)
-                mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
-                hits_str = ", ".join(
-                    [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
+                should_stop = self._run_eval_and_maybe_early_stop(
+                    epoch=epoch,
+                    avg_train_loss=avg_train_loss,
+                    step_based=False,
                 )
-                print(f"\n=== Epoch {epoch:02d} – train loss: {avg_train_loss:.4f}")
-                print(
-                    f"   - eval – loss: {eval_loss:.4f} | "
-                    f"MRR: {mrr:.4f} | {hits_str}"
-                )
-                WanDBHandler.log_metrics(
-                    metrics={
-                        "epoch": epoch,
-                        "train/loss": avg_train_loss,
-                        "eval/loss": eval_loss,
-                        "eval/mrr": mrr,
-                        "eval/hits@1": hits[1],
-                        "eval/hits@2": hits[2],
-                        "eval/hits@3": hits[3],
-                    },
-                    step=self.global_step,
-                )
+                if should_stop:
+                    break
 
         out_model_dir = (
             f"relgat_{self.scorer_type}"
@@ -373,19 +350,10 @@ class RelGATTrainer(
 
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 self.optimizer.zero_grad(set_to_none=True)
-                scores = self.model(src_ids, rel_ids, dst_ids)
-                nonfinite = (~torch.isfinite(scores)).sum().item()
-                if nonfinite > 0:
-                    WanDBHandler.log_metrics(
-                        {"train/nonfinite_scores": nonfinite},
-                        step=self.global_step,
-                    )
-                    scores = torch.nan_to_num(
-                        scores, nan=0.0, neginf=-1e9, posinf=1e9
-                    )
-
-                pos_score = scores[:B]
-                neg_score = scores[B:].view(B, self.num_neg)
+                scores = self._forward_scores(
+                    src_ids, rel_ids, dst_ids, phase="train"
+                )
+                pos_score, neg_score = self._split_scores(scores, B)
 
                 loss = prepare_scores_and_compute_loss(
                     pos_score=pos_score,
@@ -492,57 +460,12 @@ class RelGATTrainer(
                 and self.global_step % self.eval_every_n_steps == 0
             ):
                 avg_train_loss = epoch_loss / len(self.train_dataset)
-                mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
-                hits_str = ", ".join(
-                    [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
+                should_stop = self._run_eval_and_maybe_early_stop(
+                    epoch=epoch,
+                    avg_train_loss=avg_train_loss,
+                    step_based=True,
                 )
-                print(
-                    f"\n=== Step {self.global_step:12d} – "
-                    f"train loss: {avg_train_loss:.4f}"
-                )
-                print(
-                    f"   - eval – loss: {eval_loss:.4f} |"
-                    f" MRR: {mrr:.4f} | {hits_str}"
-                )
-                WanDBHandler.log_metrics(
-                    metrics={
-                        "epoch": epoch,
-                        "eval/loss": eval_loss,
-                        "eval/mrr": mrr,
-                        "eval/hits@1": hits[1],
-                        "eval/hits@2": hits[2],
-                        "eval/hits@3": hits[3],
-                    },
-                    step=self.global_step,
-                )
-
-                current_mrr = mrr
-                if current_mrr > self.best_mrr:
-                    self.best_mrr = current_mrr
-                    if (
-                        self.save_every_n_steps is not None
-                        and self.global_step % self.save_every_n_steps == 0
-                    ):
-                        self.best_ckpt_dir = f"best_checkpoint_{self.global_step}"
-                        self._save_checkpoint(subdir=self.best_ckpt_dir)
-                        self._prune_checkpoints()
-
-                        WanDBHandler.log_metrics(
-                            metrics={"checkpoint/step": self.global_step},
-                            step=self.global_step,
-                        )
-                    self._no_improve_steps = 0
-                else:
-                    self._no_improve_steps += 1
-
-                if (
-                    self.early_stop_patience is not None
-                    and self._no_improve_steps >= self.early_stop_patience
-                ):
-                    print(
-                        "\n  Early‑stopping triggered – no improvement for "
-                        f"{self.early_stop_patience} evaluation steps."
-                    )
+                if should_stop:
                     break
 
         return epoch_loss, running_loss, running_examples
@@ -570,6 +493,124 @@ class RelGATTrainer(
                 ),
             ],
         )
+
+    def _forward_scores(
+        self,
+        src_ids: torch.Tensor,
+        rel_ids: torch.Tensor,
+        dst_ids: torch.Tensor,
+        phase: str,
+    ) -> torch.Tensor:
+        """
+        Shared forward pass with non-finite handling and contextual logging.
+        phase: 'train' or 'eval' (affects metric names)
+        """
+        scores = self.model(src_ids, rel_ids, dst_ids)
+        nonfinite = (~torch.isfinite(scores)).sum().item()
+        if nonfinite > 0:
+            WanDBHandler.log_metrics(
+                {f"{phase}/nonfinite_scores": nonfinite},
+                step=self.global_step,
+            )
+            scores = torch.nan_to_num(scores, nan=0.0, neginf=-1e9, posinf=1e9)
+        return scores
+
+    def _split_scores(
+        self, scores: torch.Tensor, B: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Split flat scores into pos [B] and neg [B, num_neg]
+        """
+        pos_score = scores[:B]
+        neg_score = scores[B:].view(B, self.num_neg)
+        return pos_score, neg_score
+
+    def _print_and_log_eval(
+        self,
+        *,
+        epoch: int,
+        avg_train_loss: float,
+        mrr: float,
+        hits: Dict[int, float],
+        eval_loss: float,
+        step_based: bool,
+    ) -> None:
+        hits_str = ", ".join([f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)])
+        if step_based:
+            print(
+                f"\n=== Step {self.global_step:12d} – "
+                f"train loss: {avg_train_loss:.4f}"
+            )
+        else:
+            print(f"\n=== Epoch {epoch:02d} – train loss: {avg_train_loss:.4f}")
+        print(f"   - eval – loss: {eval_loss:.4f} | " f"MRR: {mrr:.4f} | {hits_str}")
+
+        WanDBHandler.log_metrics(
+            metrics={
+                "epoch": epoch,
+                "eval/loss": eval_loss,
+                "eval/mrr": mrr,
+                "eval/hits@1": hits.get(1, 0.0),
+                "eval/hits@2": hits.get(2, 0.0),
+                "eval/hits@3": hits.get(3, 0.0),
+            },
+            step=self.global_step,
+        )
+
+    def _on_eval_end(self, mrr: float) -> bool:
+        """
+        Handle best metric tracking, checkpointing, and early stopping counter.
+        Returns True if early stopping should be triggered.
+        """
+        improved = mrr > self.best_mrr
+        if improved:
+            self.best_mrr = mrr
+            if (
+                self.save_every_n_steps is not None
+                and self.global_step % self.save_every_n_steps == 0
+            ):
+                self.best_ckpt_dir = f"best_checkpoint_{self.global_step}"
+                self._save_checkpoint(subdir=self.best_ckpt_dir)
+                self._prune_checkpoints()
+                WanDBHandler.log_metrics(
+                    metrics={"checkpoint/step": self.global_step},
+                    step=self.global_step,
+                )
+            self._no_improve_steps = 0
+        else:
+            self._no_improve_steps += 1
+
+        if (
+            self.early_stop_patience is not None
+            and self._no_improve_steps >= self.early_stop_patience
+        ):
+            print(
+                "\n  Early‑stopping triggered – no improvement for "
+                f"{self.early_stop_patience} evaluation steps."
+            )
+            return True
+        return False
+
+    def _run_eval_and_maybe_early_stop(
+        self,
+        *,
+        epoch: int,
+        avg_train_loss: float,
+        step_based: bool,
+    ) -> bool:
+        """
+        Run evaluation, log once, update best/early-stop. Returns True if training should stop.
+        """
+        mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
+        self._print_and_log_eval(
+            epoch=epoch,
+            avg_train_loss=avg_train_loss,
+            mrr=mrr,
+            hits=hits,
+            eval_loss=eval_loss,
+            step_based=step_based,
+        )
+        return self._on_eval_end(mrr)
 
     def _num_warmup_total_steps(self, epochs: int):
         steps_per_epoch = max(
