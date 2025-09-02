@@ -50,7 +50,6 @@ class AnyRelGATModelDatasetI(abc.ABC):
         self.train_loader = None
         self.eval_loader = None
 
-        self.num_rel = None
         self.edge_index = None
         self.edge_type = None
 
