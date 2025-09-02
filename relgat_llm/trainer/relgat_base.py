@@ -8,7 +8,9 @@ from typing import Dict, List, Tuple, Optional, Any
 # RadLab ML utils dependency
 from rdl_ml_utils.handlers.wandb import WanDBHandler
 
+from relgat_llm.base.model.loss import RelGATLoss
 from relgat_llm.base.model.model import RelGATModel
+from relgat_llm.base.model.eval import RelgatEval
 from relgat_llm.base.constants import ConstantsRelGATTrainer
 
 from relgat_llm.trainer.core.any_lr_trainer import AnyLRTrainerI
@@ -249,11 +251,13 @@ class RelGATTrainer(
                 neg_s = neg_score.clamp(-20.0, 20.0)
 
                 if self.use_self_adv_neg:
-                    batch_loss = self.self_adversarial_loss(
+                    batch_loss = RelGATLoss.self_adversarial_loss(
                         pos_s, neg_s, alpha=self.self_adv_alpha
                     )
                 else:
-                    batch_loss = self.margin_ranking_loss(pos_s, neg_s, margin=1.0)
+                    batch_loss = RelGATLoss.margin_ranking_loss(
+                        pos_s, neg_s, margin=1.0
+                    )
 
                 total_loss += batch_loss.item() * B
                 total_pos += B
@@ -263,7 +267,9 @@ class RelGATTrainer(
                         [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
                     )
                     # compute_mrr_hits już sanetyzuje
-                    mrr, hits = self.compute_mrr_hits(cand_scores, true_idx=0, ks=ks)
+                    mrr, hits = RelgatEval.compute_mrr_hits(
+                        cand_scores, true_idx=0, ks=ks
+                    )
                     total_mrr += mrr
                     for k in ks:
                         total_hits[k] += hits[k]
@@ -344,7 +350,7 @@ class RelGATTrainer(
             f"relgat_{self.scorer_type}"
             f"_ratio{int(self.run_config['train_ratio'] * 100)}"
         )
-        self._save_model_and_files(subdir=out_model_dir)
+        self._save_checkpoint(subdir=out_model_dir)
         print(f"\nTraining finished – model saved to: {out_model_dir}")
 
         # ----------------- ARTIFACT W&B -----------------
@@ -399,11 +405,11 @@ class RelGATTrainer(
                 neg_score = scores[B:].view(B, self.num_neg).clamp(-20.0, 20.0)
 
                 if self.use_self_adv_neg:
-                    loss = self.self_adversarial_loss(
+                    loss = RelGATLoss.self_adversarial_loss(
                         pos_score, neg_score, alpha=self.self_adv_alpha
                     )
                 else:
-                    loss = self.margin_ranking_loss(
+                    loss = RelGATLoss.margin_ranking_loss(
                         pos_score, neg_score, margin=self.margin
                     )
 
@@ -543,7 +549,7 @@ class RelGATTrainer(
                         and self.global_step % self.save_every_n_steps == 0
                     ):
                         self.best_ckpt_dir = f"best_checkpoint_{self.global_step}"
-                        self._save_model_and_files(subdir=self.best_ckpt_dir)
+                        self._save_checkpoint(subdir=self.best_ckpt_dir)
                         self._prune_checkpoints()
 
                         # log saved checkpoint to w&b
@@ -576,7 +582,7 @@ class RelGATTrainer(
 
         Returns saved file (model) path.
         """
-        self._save_model_and_files(
+        return self._save_model_and_files(
             subdir=subdir,
             model=self.model,
             files=[
