@@ -1,13 +1,8 @@
-import abc
-import json
 import time
-import shutil
+import math
 import torch
-import random
 
 from tqdm import tqdm
-from pathlib import Path
-from collections import deque
 from typing import Dict, List, Tuple, Optional, Any
 
 # RadLab ML utils dependency
@@ -46,7 +41,10 @@ class RelGATTrainer(
         device: str = "cpu",
         # Reproduction
         seed: int = 42,
+        margin: float = 1.0,
+        warmup_steps: Optional[int] = None,
         train_ratio: float = 0.90,
+        early_stop_patience: Optional[int] = None,
         # LR management
         lr: float = 0.0001,
         lr_decay: float = 1.0,
@@ -64,19 +62,19 @@ class RelGATTrainer(
         max_checkpoints: int = 5,
         out_dir: Optional[str] = None,
         num_neg: int = 4,
-
-        # weight_decay: float = 0.0,
-        # grad_clip_norm: Optional[float] = None,
-        # early_stop_patience: Optional[int] = None,
-        # use_amp: bool = False,
-        # log_grad_norm: bool = False,
-        # disable_edge_type_mask: bool = False,
-        # self_adv_alpha: float = 1.0,
-        # profile_steps: int = 0,
-        # log_every_n_steps: int = 100,
-        # save_every_n_steps: Optional[int] = None,
-        # eval_every_n_steps: Optional[int] = None,
-        # use_self_adv_neg: bool = False,
+        # N-step
+        save_every_n_steps: Optional[int] = None,
+        eval_every_n_steps: Optional[int] = None,
+        # Logging
+        log_grad_norm: bool = True,
+        log_every_n_steps: int = 100,
+        # Additional params
+        use_amp: bool = False,
+        weight_decay: float = 0.0,
+        grad_clip_norm: Optional[float] = None,
+        disable_edge_type_mask: bool = False,
+        use_self_adv_neg: bool = False,
+        self_adv_alpha: float = 1.0,
     ):
         AnyReproductiveTrainerI.__init__(self, seed=seed, run_config=run_config)
         AnyModelArchitectureConstructorI.__init__(
@@ -123,48 +121,54 @@ class RelGATTrainer(
         self.wandb_config = wandb_config
 
         self.device = str(run_config.get("device", device))
-        self.run_name = str(run_config["run_name"], run_name)
-
-        ####################################################################################################
-        self._no_improve_steps = 0
+        self.run_name = str(run_config.get("run_name"), run_name)
+        self.warmup_steps = run_config.get("warmup_steps", warmup_steps)
+        self.margin = float(run_config.get("margin", margin))
         self.log_grad_norm = log_grad_norm
-        self.weight_decay = weight_decay
-        self.early_stop_patience = early_stop_patience
-
+        self.early_stop_patience = int(
+            run_config.get("early_stop_patience", early_stop_patience)
+        )
+        self.weight_decay = float(run_config.get("weight_decay", weight_decay))
         self.use_amp = use_amp
         if self.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
         else:
             self.scaler = None
 
-        self.grad_clip_norm = grad_clip_norm
-        self.profile_steps = profile_steps
-        self.early_stop_patience = early_stop_patience
-        self.disable_edge_type_mask = disable_edge_type_mask
-        self.use_self_adv_neg = bool(use_self_adv_neg)
-        self.self_adv_alpha = float(self_adv_alpha)
+        self.grad_clip_norm = run_config.get("grad_clip_norm", grad_clip_norm)
+        self.disable_edge_type_mask = bool(
+            run_config.get("disable_edge_type_mask", disable_edge_type_mask)
+        )
+        self.use_self_adv_neg = bool(
+            run_config.get("use_self_adv_neg", use_self_adv_neg)
+        )
+        self.self_adv_alpha = float(run_config.get("self_adv_alpha", self_adv_alpha))
 
-        # Model saving – list of best checkpoints
+        # Best mrr
         self.best_mrr = -float("inf")
 
-        # Logging
+        # Logging steps
         self.global_step = 0
         self.log_every_n_steps = max(1, int(log_every_n_steps))
 
-        # Model saving
+        # Model saving steps
         self.save_every_n_steps = (
             int(save_every_n_steps)
             if save_every_n_steps is not None and int(save_every_n_steps) > 0
             else None
         )
-
+        # Eval steps
         self.eval_every_n_steps = (
             int(eval_every_n_steps)
             if eval_every_n_steps is not None and int(eval_every_n_steps) > 0
             else None
         )
+
         ####################################################################################################
 
+        self._no_improve_steps = 0
+
+        ####################################################################################################
         # Model
         self.model = RelGATModel(
             node_emb=self.node_emb_matrix,
@@ -272,70 +276,14 @@ class RelGATTrainer(
         return avg_mrr, avg_hits, avg_eval_loss
 
     # The main training loop
-    def train(self, epochs: int = 12, margin: float = 1.0):
-        # ---- Scheduler (warmup + selected decay) ----
-        import math
-        import math as _math  # for cosine
-
-        steps_per_epoch = max(
-            1, math.ceil(len(self.train_dataset) / self.train_batch_size)
+    def train(self, epochs: int):
+        warmup_steps, total_steps = self._num_warmup_total_steps(epochs=epochs)
+        self.prepare_lr_scheduler(
+            optimizer=self.optimizer,
+            warmup_steps=warmup_steps,
+            total_steps=total_steps,
         )
-        total_steps = steps_per_epoch * max(1, int(epochs))
-        warmup_steps_cfg = self.run_config.get("warmup_steps", None)
-        if warmup_steps_cfg is None:
-            warmup_steps = int(self.default_warmup_ratio * total_steps)
-        warmup_steps = min(warmup_steps, max(0, total_steps - 1))
 
-        def _lr_lambda_linear(current_step: int):
-            if current_step < warmup_steps:
-                return float(current_step) / float(max(1, warmup_steps))
-            return max(
-                0.0,
-                float(total_steps - current_step)
-                / float(max(1, total_steps - warmup_steps)),
-            )
-
-        def _lr_lambda_cosine(current_step: int):
-            if current_step < warmup_steps:
-                return float(current_step) / float(max(1, warmup_steps))
-            progress = float(current_step - warmup_steps) / float(
-                max(1, total_steps - warmup_steps)
-            )
-            return 0.5 * (1.0 + _math.cos(_math.pi * min(1.0, max(0.0, progress))))
-
-        def _lr_lambda_constant(current_step: int):
-            if current_step < warmup_steps:
-                return float(current_step) / float(max(1, warmup_steps))
-            return 1.0
-
-        if self.scheduler_type == "linear":
-            lr_lambda = _lr_lambda_linear
-        elif self.scheduler_type == "cosine":
-            lr_lambda = _lr_lambda_cosine
-        elif self.scheduler_type == "constant":
-            lr_lambda = _lr_lambda_constant
-        else:
-            raise ValueError(f"Unknown lr_scheduler type: {self.scheduler_type}")
-
-        if self.lr_decay != 1.0:
-            # after the warm-up phase, each step is additionally
-            # multiplied by the decay-factor.
-            base_lambda = lr_lambda
-
-            def lr_lambda(step: int):
-                return base_lambda(step) * (
-                    self.lr_decay ** max(0, step - warmup_steps)
-                )
-
-            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-                self.optimizer, lr_lambda=lr_lambda
-            )
-        else:
-            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-                self.optimizer, lr_lambda=lr_lambda
-            )
-
-        # Log scheduler info (once)
         WanDBHandler.log_metrics(
             metrics={
                 "scheduler/total_steps": total_steps,
@@ -353,217 +301,14 @@ class RelGATTrainer(
             epoch_loss = 0.0
             running_loss = 0.0
             running_examples = 0
-            # ----------------- TRAIN -----------------
-            for step_in_epoch, batch in enumerate(
-                tqdm(
-                    self.train_loader,
-                    desc=f"Epoch {epoch:02d}/{epochs:02d} – training",
-                    leave=False,
-                ),
-                start=1,
-            ):
-                step_start = time.time()
-                pos, *negs = zip(*batch)
 
-                src_ids = torch.cat(
-                    [p[0] for p in pos] + [n[0] for n in sum(negs, ())], dim=0
-                ).to(self.device)
-                rel_ids = torch.cat(
-                    [p[1] for p in pos] + [n[1] for n in sum(negs, ())], dim=0
-                ).to(self.device)
-                dst_ids = torch.cat(
-                    [p[2] for p in pos] + [n[2] for n in sum(negs, ())], dim=0
-                ).to(self.device)
-
-                # use auto casting
-                with torch.amp.autocast("cuda", enabled=self.use_amp):
-                    self.optimizer.zero_grad(set_to_none=True)
-                    scores = self.model(src_ids, rel_ids, dst_ids)
-
-                    # Zabezpieczenie: policz i napraw niefinity
-                    nonfinite = (~torch.isfinite(scores)).sum().item()
-                    if nonfinite > 0:
-                        WanDBHandler.log_metrics(
-                            {"train/nonfinite_scores": nonfinite},
-                            step=self.global_step,
-                        )
-                        scores = torch.nan_to_num(
-                            scores, nan=0.0, neginf=-1e9, posinf=1e9
-                        )
-
-                    B = len(pos)
-                    pos_score = scores[:B].clamp(-20.0, 20.0)
-                    neg_score = scores[B:].view(B, self.num_neg).clamp(-20.0, 20.0)
-
-                    if self.use_self_adv_neg:
-                        loss = self.self_adversarial_loss(
-                            pos_score, neg_score, alpha=self.self_adv_alpha
-                        )
-                    else:
-                        loss = self.margin_ranking_loss(
-                            pos_score, neg_score, margin=margin
-                        )
-
-                # Jeśli loss nie jest skończony – przerwij ten krok i zaloguj
-                if not torch.isfinite(loss):
-                    WanDBHandler.log_metrics(
-                        {"train/nonfinite_loss_steps": 1}, step=self.global_step
-                    )
-                    print("Non‑finite loss encountered. Skipping step.")
-                    self.optimizer.zero_grad(set_to_none=True)
-                    continue
-
-                # scaler backward if enabled
-                if self.use_amp:
-                    self.scaler.scale(loss).backward()
-                else:
-                    loss.backward()
-
-                # gradient clipping (if enabled)
-                if self.grad_clip_norm is not None:
-                    if self.use_amp:
-                        self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=self.grad_clip_norm,
-                    )
-
-                # optimizer step
-                if self.use_amp:
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    self.optimizer.step()
-
-                # step scheduler after optimizer step
-                if self.scheduler is not None:
-                    self.scheduler.step()
-
-                # loss accumulation
-                loss_item = loss.item()
-                epoch_loss += loss_item * B
-                running_loss += loss_item * B
-                running_examples += B
-
-                # global step and logging at every N steps
-                self.global_step += 1
-
-                # logging every n steps
-                if self.global_step % self.log_every_n_steps == 0:
-                    step_end = time.time()
-                    step_time = step_end - step_start
-
-                    grad_norm = -float("inf")
-                    if self.log_grad_norm:
-                        total_norm = 0.0
-                        for p in self.model.parameters():
-                            if p.grad is not None:
-                                param_norm = p.grad.detach().data.norm(2)
-                                total_norm += param_norm.item() ** 2
-                        grad_norm = total_norm**0.5
-
-                    avg_running_loss = running_loss / max(1, running_examples)
-                    current_lr = (
-                        self.scheduler.get_last_lr()[0]
-                        if self.scheduler is not None
-                        else self.optimizer.param_groups[0]["lr"]
-                    )
-
-                    print(
-                        f"\nGlobal step {self.global_step} "
-                        f"grad_norm {grad_norm:.8f} "
-                        f"loss_step: {avg_running_loss:.8f} "
-                        f"lr: {current_lr:.8f} "
-                        f"step_time {step_time}"
-                    )
-
-                    WanDBHandler.log_metrics(
-                        metrics={
-                            "epoch": epoch,
-                            "train/loss_step": avg_running_loss,
-                            "train/step_in_epoch": step_in_epoch,
-                            "train/grad_norm": grad_norm,
-                            "train/lr": current_lr,
-                            "train/step_time": step_time,
-                            "train/pos_score_mean": (
-                                pos_score.detach().mean().item() if B > 0 else 0.0
-                            ),
-                            "train/neg_score_mean": (
-                                neg_score.detach().mean().item()
-                                if neg_score.numel() > 0
-                                else 0.0
-                            ),
-                        },
-                        step=self.global_step,
-                    )
-                    # reset counters
-                    running_loss = 0.0
-                    running_examples = 0
-
-                # Eval model every n steps
-                if (
-                    self.eval_every_n_steps is not None
-                    and self.global_step % self.eval_every_n_steps == 0
-                ):
-                    avg_train_loss = epoch_loss / len(self.train_dataset)
-                    # ----------------- EVAL -----------------
-                    mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
-                    hits_str = ", ".join(
-                        [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
-                    )
-                    print(
-                        f"\n=== Step {self.global_step:12d} – "
-                        f"train loss: {avg_train_loss:.4f}"
-                    )
-                    print(
-                        f"   - eval – loss: {eval_loss:.4f} |"
-                        f" MRR: {mrr:.4f} | {hits_str}"
-                    )
-                    # ----------------- LOG TO W&B -----------------
-                    WanDBHandler.log_metrics(
-                        metrics={
-                            "epoch": epoch,
-                            "eval/loss": eval_loss,
-                            "eval/mrr": mrr,
-                            "eval/hits@1": hits[1],
-                            "eval/hits@2": hits[2],
-                            "eval/hits@3": hits[3],
-                        },
-                        step=self.global_step,
-                    )
-
-                    # Save
-                    current_mrr = mrr
-                    if current_mrr > self.best_mrr:
-                        self.best_mrr = current_mrr
-                        if (
-                            self.save_every_n_steps is not None
-                            and self.global_step % self.save_every_n_steps == 0
-                        ):
-                            self.best_ckpt_dir = (
-                                f"best_checkpoint_{self.global_step}"
-                            )
-                            self._save_model_and_files(subdir=self.best_ckpt_dir)
-                            self._prune_checkpoints()
-
-                            # log saved checkpoint to w&b
-                            WanDBHandler.log_metrics(
-                                metrics={"checkpoint/step": self.global_step},
-                                step=self.global_step,
-                            )
-                        self._no_improve_steps = 0
-                    else:
-                        self._no_improve_steps += 1
-
-                    if (
-                        self.early_stop_patience is not None
-                        and self._no_improve_steps >= self.early_stop_patience
-                    ):
-                        print(
-                            "\n  Early‑stopping triggered – no improvement for "
-                            f"{self.early_stop_patience} evaluation steps."
-                        )
-                        break
+            epoch_loss, running_loss, running_examples = self.single_epoch(
+                epoch=epoch,
+                epochs=epochs,
+                epoch_loss=epoch_loss,
+                running_loss=running_loss,
+                running_examples=running_examples,
+            )
 
             if self.eval_every_n_steps is None:
                 avg_train_loss = epoch_loss / len(self.train_dataset)
@@ -603,6 +348,222 @@ class RelGATTrainer(
         # WanDBHandler.add_model(name=f"relgat-{self.scorer_type}", local_path="..")
         WanDBHandler.finish_wand()
 
+    def single_epoch(
+        self,
+        epoch: int,
+        epochs: int,
+        epoch_loss: float,
+        running_loss: float,
+        running_examples: int,
+    ):
+        for step_in_epoch, batch in enumerate(
+            tqdm(
+                self.train_loader,
+                desc=f"Epoch {epoch:02d}/{epochs:02d} – training",
+                leave=False,
+            ),
+            start=1,
+        ):
+            step_start = time.time()
+            pos, *negs = zip(*batch)
+
+            src_ids = torch.cat(
+                [p[0] for p in pos] + [n[0] for n in sum(negs, ())], dim=0
+            ).to(self.device)
+            rel_ids = torch.cat(
+                [p[1] for p in pos] + [n[1] for n in sum(negs, ())], dim=0
+            ).to(self.device)
+            dst_ids = torch.cat(
+                [p[2] for p in pos] + [n[2] for n in sum(negs, ())], dim=0
+            ).to(self.device)
+
+            # use auto casting
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                self.optimizer.zero_grad(set_to_none=True)
+                scores = self.model(src_ids, rel_ids, dst_ids)
+                nonfinite = (~torch.isfinite(scores)).sum().item()
+                if nonfinite > 0:
+                    WanDBHandler.log_metrics(
+                        {"train/nonfinite_scores": nonfinite},
+                        step=self.global_step,
+                    )
+                    scores = torch.nan_to_num(
+                        scores, nan=0.0, neginf=-1e9, posinf=1e9
+                    )
+
+                B = len(pos)
+                pos_score = scores[:B].clamp(-20.0, 20.0)
+                neg_score = scores[B:].view(B, self.num_neg).clamp(-20.0, 20.0)
+
+                if self.use_self_adv_neg:
+                    loss = self.self_adversarial_loss(
+                        pos_score, neg_score, alpha=self.self_adv_alpha
+                    )
+                else:
+                    loss = self.margin_ranking_loss(
+                        pos_score, neg_score, margin=self.margin
+                    )
+
+            if not torch.isfinite(loss):
+                WanDBHandler.log_metrics(
+                    {"train/nonfinite_loss_steps": 1}, step=self.global_step
+                )
+                print("Non‑finite loss encountered. Skipping step.")
+                self.optimizer.zero_grad(set_to_none=True)
+                break
+
+            # scaler backward if enabled
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            # gradient clipping (if enabled)
+            if self.grad_clip_norm is not None:
+                if self.use_amp:
+                    self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.grad_clip_norm,
+                )
+
+            # optimizer step
+            if self.use_amp:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+
+            # step scheduler after optimizer step
+            if self.scheduler is not None:
+                self.scheduler.step()
+
+            # loss accumulation
+            loss_item = loss.item()
+            epoch_loss += loss_item * B
+            running_loss += loss_item * B
+            running_examples += B
+
+            # global step and logging at every N steps
+            self.global_step += 1
+
+            # logging every n steps
+            if self.global_step % self.log_every_n_steps == 0:
+                step_end = time.time()
+                step_time = step_end - step_start
+
+                grad_norm = -float("inf")
+                if self.log_grad_norm:
+                    total_norm = 0.0
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.detach().data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    grad_norm = total_norm**0.5
+
+                avg_running_loss = running_loss / max(1, running_examples)
+                current_lr = (
+                    self.scheduler.get_last_lr()[0]
+                    if self.scheduler is not None
+                    else self.optimizer.param_groups[0]["lr"]
+                )
+
+                print(
+                    f"\nGlobal step {self.global_step} "
+                    f"grad_norm {grad_norm:.8f} "
+                    f"loss_step: {avg_running_loss:.8f} "
+                    f"lr: {current_lr:.8f} "
+                    f"step_time {step_time}"
+                )
+
+                WanDBHandler.log_metrics(
+                    metrics={
+                        "epoch": epoch,
+                        "train/loss_step": avg_running_loss,
+                        "train/step_in_epoch": step_in_epoch,
+                        "train/grad_norm": grad_norm,
+                        "train/lr": current_lr,
+                        "train/step_time": step_time,
+                        "train/pos_score_mean": (
+                            pos_score.detach().mean().item() if B > 0 else 0.0
+                        ),
+                        "train/neg_score_mean": (
+                            neg_score.detach().mean().item()
+                            if neg_score.numel() > 0
+                            else 0.0
+                        ),
+                    },
+                    step=self.global_step,
+                )
+                # reset counters
+                running_loss = 0.0
+                running_examples = 0
+
+            # Eval model every n steps
+            if (
+                self.eval_every_n_steps is not None
+                and self.global_step % self.eval_every_n_steps == 0
+            ):
+                avg_train_loss = epoch_loss / len(self.train_dataset)
+                # ----------------- EVAL -----------------
+                mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
+                hits_str = ", ".join(
+                    [f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)]
+                )
+                print(
+                    f"\n=== Step {self.global_step:12d} – "
+                    f"train loss: {avg_train_loss:.4f}"
+                )
+                print(
+                    f"   - eval – loss: {eval_loss:.4f} |"
+                    f" MRR: {mrr:.4f} | {hits_str}"
+                )
+                # ----------------- LOG TO W&B -----------------
+                WanDBHandler.log_metrics(
+                    metrics={
+                        "epoch": epoch,
+                        "eval/loss": eval_loss,
+                        "eval/mrr": mrr,
+                        "eval/hits@1": hits[1],
+                        "eval/hits@2": hits[2],
+                        "eval/hits@3": hits[3],
+                    },
+                    step=self.global_step,
+                )
+
+                # Save
+                current_mrr = mrr
+                if current_mrr > self.best_mrr:
+                    self.best_mrr = current_mrr
+                    if (
+                        self.save_every_n_steps is not None
+                        and self.global_step % self.save_every_n_steps == 0
+                    ):
+                        self.best_ckpt_dir = f"best_checkpoint_{self.global_step}"
+                        self._save_model_and_files(subdir=self.best_ckpt_dir)
+                        self._prune_checkpoints()
+
+                        # log saved checkpoint to w&b
+                        WanDBHandler.log_metrics(
+                            metrics={"checkpoint/step": self.global_step},
+                            step=self.global_step,
+                        )
+                    self._no_improve_steps = 0
+                else:
+                    self._no_improve_steps += 1
+
+                if (
+                    self.early_stop_patience is not None
+                    and self._no_improve_steps >= self.early_stop_patience
+                ):
+                    print(
+                        "\n  Early‑stopping triggered – no improvement for "
+                        f"{self.early_stop_patience} evaluation steps."
+                    )
+                    break
+
+        return epoch_loss, running_loss, running_examples
+
     def _save_checkpoint(self, subdir: str) -> str:
         """
         Saves model state_dict into self.save_dir/subdir/OUT_MODEL_NAME
@@ -627,36 +588,13 @@ class RelGATTrainer(
             ],
         )
 
-    #     out_dir = self.save_dir / subdir
-    #     out_dir.mkdir(parents=True, exist_ok=True)
-    #     out_path = out_dir / ConstantsRelGATTrainer.Default.OUT_MODEL_NAME
-    #     torch.save(self.model.state_dict(), out_path)
-    #
-    #     _files = [
-    #         (
-    #             ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME,
-    #             self.run_config,
-    #         ),
-    #         (
-    #             ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
-    #             self.rel2idx,
-    #         ),
-    #     ]
-    #     for f_name, json_data in _files:
-    #         out_cfg_path = out_dir / f_name
-    #         with open(out_cfg_path, "w") as f:
-    #             f.write(json.dumps(json_data, indent=2, ensure_ascii=False))
-    #     return str(out_path)
-    #
-    # def _prune_checkpoints(self) -> None:
-    #     """
-    #     Keeps a maximum of max_checkpoints most recent (or best) checkpoints.
-    #     The oldest ones are deleted from the disc.
-    #     """
-    #     while len(self.saved_checkpoints) > self.max_checkpoints:
-    #         oldest = self.saved_checkpoints.popleft()
-    #         try:
-    #             shutil.rmtree(oldest)
-    #             print(f"️ Removed old checkpoint: {oldest}")
-    #         except Exception as exc:
-    #             print(f" Could not delete {oldest}: {exc}")
+    def _num_warmup_total_steps(self, epochs: int):
+        steps_per_epoch = max(
+            1, math.ceil(len(self.train_dataset) / self.train_batch_size)
+        )
+        total_steps = steps_per_epoch * max(1, int(epochs))
+        warmup_steps = self.run_config.get("warmup_steps", self.warmup_steps)
+        if warmup_steps is None:
+            warmup_steps = int(self.default_warmup_ratio * total_steps)
+        warmup_steps = min(warmup_steps, max(0, total_steps - 1))
+        return warmup_steps, total_steps

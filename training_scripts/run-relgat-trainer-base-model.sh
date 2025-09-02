@@ -36,15 +36,15 @@ then
   LOG_EVERY_N_STEPS=10
 elif [[ "${ARCHITECTURE}" == "medium" ]]
 then
-  EPOCHS=40
-  BATCH_SIZE=256
-  NUM_NEG_TO_POS=10
+  EPOCHS=10
+  BATCH_SIZE=128
+  NUM_NEG_TO_POS=24
 
-  LEARNING_RATE=0.00007
+  LEARNING_RATE=0.0002
 
-  GAT_OUT_DIM=128
-  NUM_OF_LAYERS=3
-  NUM_OF_HEADS=10
+  GAT_OUT_DIM=256
+  NUM_OF_LAYERS=1
+  NUM_OF_HEADS=12
 
   SAVE_N_STEPS=200
   EVAL_N_STEPS=200
@@ -91,7 +91,7 @@ LR_SCHEDULER="linear"
 WEIGHT_DECAY=0.0
 
 # If set, clips gradient norm to this value (default: None – no clipping)
-GRADIENT_CLIPPING=1.0
+GRADIENT_CLIPPING=3.0
 
 # Number of evaluation steps without improvement after which training stops
 EARLY_STOP_PATIENCE_STEPS=10
