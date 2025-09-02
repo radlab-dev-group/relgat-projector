@@ -1,6 +1,7 @@
 import time
 import math
 import torch
+from datetime import datetime
 
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
@@ -123,9 +124,10 @@ class RelGATTrainer(
         self.wandb_config = wandb_config
 
         self.device = str(run_config.get("device", device))
-        self.run_name = run_config.get("run_name", run_name)
-        if self.run_name is None:
-            self.run_name = architecture_name
+
+        self.run_name = self._prepare_run_name(
+            run_name=run_name, architecture_name=architecture_name
+        )
 
         self.warmup_steps = run_config.get("warmup_steps", warmup_steps)
         self.margin = float(run_config.get("margin", margin))
@@ -607,3 +609,26 @@ class RelGATTrainer(
             warmup_steps = int(self.default_warmup_ratio * total_steps)
         warmup_steps = min(warmup_steps, max(0, total_steps - 1))
         return warmup_steps, total_steps
+
+    def _prepare_run_name(
+        self, run_name: Optional[str], architecture_name: Optional[str]
+    ) -> str:
+        """
+        Prepare a run name in the form: '{model-name}-{architecture_name}-YYYYMMDD_HHMMSS'.
+
+        If architecture_name is None or empty, 'run' is used as a default prefix.
+        """
+        if run_name is None:
+            run_name = self.run_config.get("run_name")
+
+        prefix = ""
+        if run_name is not None and len(run_name.strip()):
+            prefix = run_name.strip()
+        else:
+            base_model_name = self.run_config.get("base_model_name", "")
+            if base_model_name is not None and len(base_model_name):
+                prefix = base_model_name.strip() + "-"
+            prefix += architecture_name if architecture_name else "run"
+
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{prefix}-{date_str}"
