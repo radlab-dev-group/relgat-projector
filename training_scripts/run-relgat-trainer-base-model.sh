@@ -159,4 +159,4 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-base-train \
   ${GRADIENT_CLIPPING:+--grad-clip-norm="${GRADIENT_CLIPPING}"} \
   ${USE_AMP:+--use-amp="${USE_AMP}"} \
   ${DISABLE_EDGE_TYPES:+--disable-edge-type-mask="${DISABLE_EDGE_TYPES}"} \
-  ${USE_SELF_ADV_NEG:+----use-self-adv-neg="${USE_SELF_ADV_NEG}"}
+  ${USE_SELF_ADV_NEG:+--use-self-adv-neg="${USE_SELF_ADV_NEG}"}
