@@ -1,4 +1,3 @@
-import abc
 import json
 import shutil
 
@@ -11,16 +10,25 @@ from typing import Tuple, List, Any, Dict, Optional
 from relgat_llm.base.constants import ConstantsRelGATTrainer
 
 
-class RelGATTrainerBaseStorageI(abc.ABC):
+class RelGATStorage:
     def __init__(
         self,
         out_dir: str,
         run_config: Dict[str, Any],
-        max_checkpoints: Optional[int] = None,
+        max_checkpoints: Optional[int],
+        save_every_n_steps: Optional[int],
     ):
         self.out_dir = str(run_config.get("out_dir", out_dir))
-        self.max_checkpoints = int(
-            run_config.get("max_checkpoints", max_checkpoints)
+
+        self.max_checkpoints = run_config.get("max_checkpoints", max_checkpoints)
+        if self.max_checkpoints is not None:
+            self.max_checkpoints = int(self.max_checkpoints)
+
+        # Model saving steps
+        self.save_every_n_steps = (
+            int(save_every_n_steps)
+            if save_every_n_steps is not None and int(save_every_n_steps) > 0
+            else None
         )
 
         # Fifo queue
@@ -34,7 +42,7 @@ class RelGATTrainerBaseStorageI(abc.ABC):
         )
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
-    def _save_model_and_files(
+    def save_model_and_files(
         self, subdir: str, model, files: List[Tuple[str, Dict[Any, Any]]]
     ) -> str:
         out_dir = self.save_dir / subdir

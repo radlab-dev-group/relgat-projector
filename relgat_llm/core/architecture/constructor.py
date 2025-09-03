@@ -1,17 +1,7 @@
-import abc
-import torch
-import random
-
-import numpy as np
-
-from typing import Tuple, List, Any, Dict, Optional
-
-from relgat_llm.base.constants import ConstantsRelGATTrainer
-
-# distmult or transe
+from typing import Any, Dict, Optional
 
 
-class AnyModelArchitectureConstructorI(abc.ABC):
+class ModelArchitectureConstructor:
     def __init__(
         self,
         gat_out_dim: int,

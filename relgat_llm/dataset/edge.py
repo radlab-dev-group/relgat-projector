@@ -1,6 +1,7 @@
 import torch
 import random
 
+from typing import Tuple
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -84,8 +85,8 @@ class EdgeDataset(Dataset):
             and the following elements are tuples for each negative sample
             ``(src_emb, rel_id, corrupt_dst_emb, torch.tensor(0.0))``.
         """
-        src, dst, rel = self.edges[idx]
-        rel_id = self.rel2idx[rel] if isinstance(rel, str) else int(rel)
+        src, dst, rel_name = self.edges[idx]
+        rel_id = self.rel2idx[rel_name]
 
         # Positive example (rel_id as a long tensor with shape[1])
         pos = (
@@ -112,3 +113,25 @@ class EdgeDataset(Dataset):
             )
 
         return pos, *neg
+
+
+def concat_pos_negs_to_tensors(
+    pos: Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...],
+    negs: Tuple[Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...], ...],
+    device: str,
+):
+    src_ids = torch.cat(
+        [p[0] for p in pos] + [n[0] for n in sum(negs, ())], dim=0
+    ).to(device)
+
+    rel_ids = torch.cat(
+        [p[1] for p in pos] + [n[1] for n in sum(negs, ())], dim=0
+    ).to(device)
+
+    dst_ids = torch.cat(
+        [p[2] for p in pos] + [n[2] for n in sum(negs, ())], dim=0
+    ).to(device)
+
+    B = len(pos)
+
+    return src_ids, rel_ids, dst_ids, B

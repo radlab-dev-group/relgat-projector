@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from relgat_llm.base.model.layer import RelGATLayer
-from relgat_llm.base.model.scorer import DistMultScorer, TransEScorer
+from relgat_llm.core.scorer import DistMultScorer, TransEScorer
+from relgat_llm.core.model.relgat_base.layer import RelGATLayer
 
 
 class RelGATModel(nn.Module):
@@ -21,6 +21,7 @@ class RelGATModel(nn.Module):
     ):
         super().__init__()
         self.register_buffer("node_emb_fixed", node_emb)  # not a Parameter
+
         self.edge_index = edge_index
         self.edge_type = edge_type
         self.gat_num_layers = gat_num_layers

@@ -1,4 +1,3 @@
-import abc
 import torch
 import random
 
@@ -8,7 +7,7 @@ from typing import Tuple, List, Any, Dict
 from relgat_llm.dataset.edge import EdgeDataset
 
 
-class AnyRelGATModelDatasetI(abc.ABC):
+class RelGATDataset:
     def __init__(
         self,
         node2emb: Dict[int, torch.Tensor],
@@ -115,8 +114,8 @@ class AnyRelGATModelDatasetI(abc.ABC):
 
         self.eval_loader = DataLoader(
             self.eval_dataset,
-            batch_size=self.train_batch_size,
-            shuffle=False,
+            batch_size=self.eval_batch_size,
+            shuffle=True,
             num_workers=0,
             collate_fn=lambda batch: batch,
         )

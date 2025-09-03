@@ -21,15 +21,15 @@ ARCHITECTURE="small"
 # =============================================================================
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
-  EPOCHS=5
-  BATCH_SIZE=512
-  NUM_NEG_TO_POS=8
+  EPOCHS=20
+  BATCH_SIZE=256
+  NUM_NEG_TO_POS=32
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
-  NUM_OF_HEADS=8
+  NUM_OF_HEADS=12
 
-  LEARNING_RATE=0.0001
+  LEARNING_RATE=0.00002
 
   SAVE_N_STEPS=100
   EVAL_N_STEPS=100
@@ -71,7 +71,7 @@ fi
 
 # =============================================================================
 # Scorer, one of: [distmult, transe]
-SCORER="distmult"
+SCORER="transe"
 
 # Dropout used while training (on embedder dimension)
 DROPOUT=0.3
@@ -91,7 +91,7 @@ LR_SCHEDULER="linear"
 WEIGHT_DECAY=0.0
 
 # If set, clips gradient norm to this value (default: None – no clipping)
-GRADIENT_CLIPPING=3.0
+#GRADIENT_CLIPPING=10.0
 
 # Number of evaluation steps without improvement after which training stops
 EARLY_STOP_PATIENCE_STEPS=10
@@ -104,7 +104,7 @@ EARLY_STOP_PATIENCE_STEPS=10
 #DISABLE_EDGE_TYPES=1
 
 # Enable self-adversarial negative sampling instead of margin ranking loss
-#USE_SELF_ADV_NEG=1
+USE_SELF_ADV_NEG=True
 
 # =============================================================================#
 # =============================================================================
@@ -119,7 +119,7 @@ DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset
 # Available datasets:
 #  - FULL: dataset_20250824_full
 #  - SAMPLE: dataset_20250824_limit_1000
-DATASET_DIR="${DATASET_ROOT}/dataset"
+DATASET_DIR="${DATASET_ROOT}/dataset_syn_two_way"
 LU_EMBEDDING="${DATASET_DIR}/lexical_units_embedding.pickle"
 RELS_MAPPING="${DATASET_DIR}/relation_to_idx.json"
 RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
@@ -159,4 +159,4 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-base-train \
   ${GRADIENT_CLIPPING:+--grad-clip-norm="${GRADIENT_CLIPPING}"} \
   ${USE_AMP:+--use-amp="${USE_AMP}"} \
   ${DISABLE_EDGE_TYPES:+--disable-edge-type-mask="${DISABLE_EDGE_TYPES}"} \
-  ${USE_SELF_ADV_NEG:+--use-self-adv-neg="${USE_SELF_ADV_NEG}"}
+  ${USE_SELF_ADV_NEG:+--use-self-adv-neg}

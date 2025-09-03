@@ -1,41 +1,27 @@
 import time
-import math
 import torch
-from datetime import datetime
 
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
 
-# RadLab ML utils dependency
-from rdl_ml_utils.handlers.wandb import WanDBHandler
+from relgat_llm.utils.random_seed import RandomSeed
+from relgat_llm.utils.logging_adapter import LoggerAdapter
 
-from relgat_llm.base.model.loss import RelGATLoss
-from relgat_llm.base.model.model import RelGATModel
-from relgat_llm.base.model.eval import RelgatEval
 from relgat_llm.base.constants import ConstantsRelGATTrainer
+from relgat_llm.dataset.relgat_dataset import RelGATDataset
+from relgat_llm.handlers.storage import RelGATStorage
 
-from relgat_llm.trainer.core.any_lr_trainer import AnyLRTrainerI
-from relgat_llm.trainer.core.any_repr_trainer import AnyReproductiveTrainerI
-from relgat_llm.trainer.core.relgat_dataset import AnyRelGATModelDatasetI
-from relgat_llm.trainer.core.any_storage_trainer import RelGATTrainerBaseStorageI
-from relgat_llm.trainer.core.any_architecture import AnyModelArchitectureConstructorI
+from relgat_llm.core.eval import RelgatEval
+from relgat_llm.core.loss import RelGATLoss
+from relgat_llm.core.lr import TrainingScheduler
+from relgat_llm.core.model.relgat_base.model import RelGATModel
+from relgat_llm.core.architecture.constructor import ModelArchitectureConstructor
 
-# ... existing code ...
-from relgat_llm.trainer.components.batching import concat_pos_negs_to_tensors
-from relgat_llm.trainer.components.losses import prepare_scores_and_compute_loss
 from relgat_llm.trainer.components.grad import compute_total_grad_norm
-from relgat_llm.trainer.components.logging_adapter import LoggerAdapter
-
-# ... existing code ...
+from relgat_llm.trainer.components.relgat_batching import concat_pos_negs_to_tensors
 
 
-class RelGATTrainer(
-    AnyReproductiveTrainerI,
-    AnyLRTrainerI,
-    AnyModelArchitectureConstructorI,
-    AnyRelGATModelDatasetI,
-    RelGATTrainerBaseStorageI,
-):
+class RelGATTrainer:
     def __init__(
         self,
         # Whole config -- with prior higher than args
@@ -80,16 +66,23 @@ class RelGATTrainer(
         log_grad_norm: bool = True,
         log_every_n_steps: int = 100,
         # Additional params
-        use_amp: bool = False,
         weight_decay: float = 0.0,
         grad_clip_norm: Optional[float] = None,
         disable_edge_type_mask: bool = False,
         use_self_adv_neg: bool = False,
         self_adv_alpha: float = 1.0,
+        # evaluation options
+        eval_vectorized: bool = True,
+        # use_amp: bool = False,
+        eval_ks: Tuple[int, ...] = (1, 2, 3, 4, 5),
     ):
-        AnyReproductiveTrainerI.__init__(self, seed=seed, run_config=run_config)
-        AnyModelArchitectureConstructorI.__init__(
-            self,
+        # Experiments reproduction (seed)
+        self.repr_training = RandomSeed(
+            seed=seed, run_config=run_config, auto_set_seed=True
+        )
+
+        # Specify architecture
+        self.architecture = ModelArchitectureConstructor(
             gat_out_dim=gat_out_dim,
             gat_heads=gat_heads,
             gat_num_layers=gat_num_layers,
@@ -100,15 +93,18 @@ class RelGATTrainer(
             base_model_name=base_model_name,
             run_config=run_config,
         )
-        AnyLRTrainerI.__init__(
-            self,
+
+        # Training scheduler (total steps, warmup steps, etc.)
+        self.training_scheduler = TrainingScheduler(
             lr=lr,
             lr_scheduler=lr_scheduler,
             lr_decay=lr_decay,
+            warmup_steps=warmup_steps,
             run_config=run_config,
         )
-        AnyRelGATModelDatasetI.__init__(
-            self,
+
+        # RelGAT dataset
+        self.dataset = RelGATDataset(
             device=device,
             node2emb=node2emb,
             rel2idx=rel2idx,
@@ -119,46 +115,55 @@ class RelGATTrainer(
             eval_batch_size=eval_batch_size,
             run_config=run_config,
         )
-
-        RelGATTrainerBaseStorageI.__init__(
-            self,
+        # Storage and training handling (checkpoints)
+        self.storage = RelGATStorage(
             out_dir=out_dir,
             max_checkpoints=max_checkpoints,
+            save_every_n_steps=save_every_n_steps,
             run_config=run_config,
         )
 
-        # Training environment
-        self.run_config = run_config
-        self.wandb_config = wandb_config
-
-        self.device = str(run_config.get("device", device))
-
-        self.run_name = self._prepare_run_name(
-            run_name=run_name, architecture_name=architecture_name
+        self.log_adapter = LoggerAdapter(
+            run_name=run_name,
+            architecture_name=architecture_name,
+            run_config=run_config,
         )
 
-        self.warmup_steps = run_config.get("warmup_steps", warmup_steps)
-        self.margin = float(run_config.get("margin", margin))
+        # Which loss should be used?
+        use_self_adv_neg = run_config.get("use_self_adv_neg", use_self_adv_neg)
+        if use_self_adv_neg is not None:
+            use_self_adv_neg = bool(use_self_adv_neg)
+        self.loss = RelGATLoss(
+            loss_type="self_adversarial_loss" if use_self_adv_neg else "margin_ranking_loss",
+            self_adv_alpha=self_adv_alpha,
+            margin=margin,
+            clamp_limit=20,
+            run_config=run_config
+        )
+
+        # ====================================================================
+        # Training environment
+        self.run_config = run_config
+        self.device = str(run_config.get("device", device))
+
+        # Optimizer (Adam/AdamW) w-d
+        self.weight_decay = float(run_config.get("weight_decay", weight_decay))
+
+        # Gradient clipping
+        self.grad_clip_norm = run_config.get("grad_clip_norm", grad_clip_norm)
+
+        # ====================================================================
+        # ====================================================================
+        # ====================================================================
+        # ====================================================================
+        # ====================================================================
         self.log_grad_norm = log_grad_norm
         self.early_stop_patience = int(
             run_config.get("early_stop_patience", early_stop_patience)
         )
-        self.weight_decay = float(run_config.get("weight_decay", weight_decay))
-        self.use_amp = use_amp
-        if self.use_amp:
-            self.scaler = torch.cuda.amp.GradScaler()
-        else:
-            self.scaler = None
-
-        self.grad_clip_norm = run_config.get("grad_clip_norm", grad_clip_norm)
         self.disable_edge_type_mask = bool(
             run_config.get("disable_edge_type_mask", disable_edge_type_mask)
         )
-        self.use_self_adv_neg = bool(
-            run_config.get("use_self_adv_neg", use_self_adv_neg)
-        )
-        self.self_adv_alpha = float(run_config.get("self_adv_alpha", self_adv_alpha))
-
         # Best mrr
         self.best_mrr = -float("inf")
 
@@ -166,134 +171,180 @@ class RelGATTrainer(
         self.global_step = 0
         self.log_every_n_steps = max(1, int(log_every_n_steps))
 
-        # Model saving steps
-        self.save_every_n_steps = (
-            int(save_every_n_steps)
-            if save_every_n_steps is not None and int(save_every_n_steps) > 0
-            else None
-        )
         # Eval steps
         self.eval_every_n_steps = (
             int(eval_every_n_steps)
             if eval_every_n_steps is not None and int(eval_every_n_steps) > 0
             else None
         )
-
-        ####################################################################################################
+        # New evaluation config
+        self.eval_vectorized = bool(
+            run_config.get("eval_vectorized", eval_vectorized)
+        )
+        self.eval_ks = tuple(run_config.get("eval_ks", list(eval_ks)))
 
         self._no_improve_steps = 0
 
         ####################################################################################################
-        # Model
+        ####################################################################################################
+        ####################################################################################################
+        ####################################################################################################
+        ####################################################################################################
+        # Model definition
         self.model = RelGATModel(
-            node_emb=self.node_emb_matrix,
-            edge_index=self.edge_index,
-            edge_type=self.edge_type,
-            num_rel=self.num_rel,
-            scorer_type=self.scorer_type,
-            gat_out_dim=self.gat_out_dim,
-            gat_heads=self.gat_heads,
-            dropout=self.dropout,
-            relation_attn_dropout=self.dropout_rel_attention,
-            gat_num_layers=self.gat_num_layers,
+            node_emb=self.dataset.node_emb_matrix,
+            edge_index=self.dataset.edge_index,
+            edge_type=self.dataset.edge_type,
+            num_rel=self.dataset.num_rel,
+            scorer_type=self.architecture.scorer_type,
+            gat_out_dim=self.architecture.gat_out_dim,
+            gat_heads=self.architecture.gat_heads,
+            dropout=self.architecture.dropout,
+            relation_attn_dropout=self.architecture.dropout_rel_attention,
+            gat_num_layers=self.architecture.gat_num_layers,
         ).to(self.device)
 
         # Optimizer
+        # TODO: Change to AdamW (as argument -> optimizer="Adam | AdamW"
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
-            lr=self.base_lr,
+            lr=self.training_scheduler.base_lr,
             weight_decay=self.weight_decay,
         )
 
-        # W&B initialization (kept identical)
-        if self.wandb_config is not None:
-            WanDBHandler.init_wandb(
-                wandb_config=self.wandb_config,
-                run_config=self.run_config,
-                training_args=None,
-                run_name=self.run_name,
-            )
+        ####################################################################################################
+        # W&B initialization
+        self.log_adapter.init_wandb_if_needed()
+
+    def on_step_end(
+        self, *, step: int, epoch: int, metrics: Dict[str, float]
+    ) -> None:
+        """
+        Callback executed at the end of logging step during training.
+        Default: no-op. Override to inject custom behavior.
+        """
+        return
+
+    def on_epoch_end(self, *, epoch: int) -> None:
+        """
+        Callback executed at the end of each training epoch.
+        Default: no-op. Override to inject custom behavior.
+        """
+        return
 
     def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
         self.model.eval()
 
+        ks = tuple(sorted(set(ks)))  # sanitize
         total_mrr = 0.0
         total_hits = {k: 0.0 for k in ks}
         n_examples = 0
-
         total_loss = 0.0
         total_pos = 0
+        # Akumulator błędu translacji TransE (jeśli dotyczy)
+        transe_err_sum = 0.0
 
         with torch.no_grad():
             for batch in tqdm(self.eval_loader, desc="Evaluation", leave=False):
                 if not batch:
                     continue
-
                 pos, *negs = zip(*batch)
-
-                src_ids, rel_ids, dst_ids, B = concat_pos_negs_to_tensors(
+                src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
                     pos, negs, device=self.device
                 )
 
-                scores = self._forward_scores(
+                pos_examples_in_batch = len(pos)
+
+                scores = self._forward_model_scores(
                     src_ids, rel_ids, dst_ids, phase="eval"
                 )  # [B*(1+num_neg)]
-                pos_score, neg_score = self._split_scores(scores, B)
-
-                batch_loss = prepare_scores_and_compute_loss(
-                    pos_score=pos_score,
-                    neg_score=neg_score,
-                    use_self_adv_neg=self.use_self_adv_neg,
-                    self_adv_alpha=self.self_adv_alpha,
-                    margin=1.0,
-                    clamp_limit=20.0,
+                pos_score, neg_score = self._split_scores(
+                    scores, pos_examples_in_batch
                 )
 
-                total_loss += batch_loss.item() * B
-                total_pos += B
+                # Loss for reporting
+                batch_loss = self.loss.prepare_scores_and_compute_loss(
+                    pos_score=pos_score, neg_score=neg_score
+                )
+                total_loss += batch_loss.item() * pos_examples_in_batch
+                total_pos += pos_examples_in_batch
 
-                for i in range(B):
-                    cand_scores = torch.cat(
-                        [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
+                # Metrics: vectorized or per-sample
+                if self.eval_vectorized:
+                    mrr_b, hits_b = RelgatEval.compute_batch_metrics_vectorized(
+                        pos_score=pos_score, neg_score=neg_score, ks=ks
                     )
-                    mrr, hits = RelgatEval.compute_mrr_hits(
-                        cand_scores, true_idx=0, ks=ks
-                    )
-                    total_mrr += mrr
+                    total_mrr += mrr_b * pos_examples_in_batch
                     for k in ks:
-                        total_hits[k] += hits[k]
-                    n_examples += 1
+                        total_hits[k] += hits_b[k] * pos_examples_in_batch
+                    n_examples += pos_examples_in_batch
+                else:
+                    for i in range(pos_examples_in_batch):
+                        cand_scores = torch.cat(
+                            [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
+                        )
+                        mrr, hits = RelgatEval.compute_mrr_hits(
+                            cand_scores, true_idx=0, ks=ks
+                        )
+                        total_mrr += mrr
+                        for k in ks:
+                            total_hits[k] += hits[k]
+                        n_examples += 1
+
+                # Optional evaluation logging of score statistics
+                self.log_adapter.log_metrics(
+                    metrics={
+                        "eval/pos_score_mean": (
+                            pos_score.detach().clamp(-20.0, 20.0).mean().item()
+                            if pos_examples_in_batch > 0
+                            else 0.0
+                        ),
+                        "eval/neg_score_mean": (
+                            neg_score.detach().clamp(-20.0, 20.0).mean().item()
+                            if pos_examples_in_batch > 0
+                            else 0.0
+                        ),
+                    },
+                    step=self.global_step,
+                )
+
+                # # TransE translation error (średnia po batchu, sumowana)
+                # transe_err_batch = None
+                # # transe_err_batch = self._compute_transe_translation_error(
+                # #     src_ids=src_ids, rel_ids=rel_ids, dst_ids=dst_ids, B=B
+                # # )
+                # if transe_err_batch is not None:
+                #     transe_err_sum += transe_err_batch * float(B)
 
         n_examples = max(1, n_examples)
         avg_mrr = total_mrr / n_examples
         avg_hits = {k: total_hits[k] / n_examples for k in ks}
         avg_eval_loss = total_loss / max(1, total_pos)
 
+        # Loguj średni błąd translacji TransE na eval (jeśli dotyczy)
+        if total_pos > 0 and transe_err_sum > 0.0:
+            self.log_adapter.log_metrics(
+                metrics={
+                    "eval/transe_trans_error": transe_err_sum / float(total_pos)
+                },
+                step=self.global_step,
+            )
+
         return avg_mrr, avg_hits, avg_eval_loss
 
-    # The main training loop
     def train(self, epochs: int):
-        warmup_steps, total_steps = self._num_warmup_total_steps(epochs=epochs)
-        self.prepare_lr_scheduler(
-            optimizer=self.optimizer,
-            warmup_steps=warmup_steps,
-            total_steps=total_steps,
+        # Prepare the number of total steps and warmup steps
+        self.training_scheduler.prepare_warmup_and_total_steps(
+            epochs=epochs,
+            train_dataset=self.dataset.train_dataset,
+            train_batch_size=self.dataset.train_batch_size,
         )
+        # Prepare learning scheduler
+        self.training_scheduler.prepare_lr_scheduler(optimizer=self.optimizer)
 
-        WanDBHandler.log_metrics(
-            metrics={
-                "scheduler/total_steps": total_steps,
-                "scheduler/warmup_steps": warmup_steps,
-                "scheduler/type": self.scheduler_type,
-                "config/use_self_adv_neg": float(self.use_self_adv_neg),
-                "config/self_adv_alpha": float(self.self_adv_alpha),
-                "train/base_lr": self.base_lr,
-            },
-            step=self.global_step,
-        )
+        self._log_metrics_on_begining()
 
         for epoch in range(1, epochs + 1):
-            self.model.train()
             epoch_loss = 0.0
             running_loss = 0.0
             running_examples = 0
@@ -306,24 +357,17 @@ class RelGATTrainer(
                 running_examples=running_examples,
             )
 
-            if self.eval_every_n_steps is None:
-                avg_train_loss = epoch_loss / len(self.train_dataset)
-                should_stop = self._run_eval_and_maybe_early_stop(
-                    epoch=epoch,
-                    avg_train_loss=avg_train_loss,
-                    step_based=False,
-                )
-                if should_stop:
-                    break
+            self.on_epoch_end(epoch=epoch)
+            if self._eval_if_needed_and_stop_if_needed(
+                epoch=epoch, epoch_loss=epoch_loss
+            ):
+                break
 
-        out_model_dir = (
-            f"relgat_{self.scorer_type}"
-            f"_ratio{int(self.run_config['train_ratio'] * 100)}"
-        )
-        self._save_checkpoint(subdir=out_model_dir)
+        # Save last model
+        out_model_dir = self._save_checkpoint(subdir=None)
+
         print(f"\nTraining finished – model saved to: {out_model_dir}")
-
-        WanDBHandler.finish_wand()
+        self.log_adapter.finish_wand_if_needed()
 
     def single_epoch(
         self,
@@ -333,168 +377,175 @@ class RelGATTrainer(
         running_loss: float,
         running_examples: int,
     ):
+        self.model.train()
+
         for step_in_epoch, batch in enumerate(
             tqdm(
-                self.train_loader,
+                self.dataset.train_loader,
                 desc=f"Epoch {epoch:02d}/{epochs:02d} – training",
                 leave=False,
             ),
             start=1,
         ):
-            step_start = time.time()
-            pos, *negs = zip(*batch)
+            step_start_time = time.time()
 
-            src_ids, rel_ids, dst_ids, B = concat_pos_negs_to_tensors(
+            pos, *negs = zip(*batch)
+            pos_examples_in_batch = len(pos)
+            src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
                 pos, negs, device=self.device
             )
 
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
-                self.optimizer.zero_grad(set_to_none=True)
-                scores = self._forward_scores(
-                    src_ids, rel_ids, dst_ids, phase="train"
-                )
-                pos_score, neg_score = self._split_scores(scores, B)
+            self.optimizer.zero_grad(set_to_none=True)
+            scores = self._forward_model_scores(
+                src_ids, rel_ids, dst_ids, phase="train"
+            )
+            pos_score, neg_score = self._split_scores(scores, pos_examples_in_batch)
 
-                loss = prepare_scores_and_compute_loss(
-                    pos_score=pos_score,
-                    neg_score=neg_score,
-                    use_self_adv_neg=self.use_self_adv_neg,
-                    self_adv_alpha=self.self_adv_alpha,
-                    margin=self.margin,
-                    clamp_limit=20.0,
-                )
+            print("pos_score=", pos_score)
+            print("neg_score=", neg_score)
 
-            if not torch.isfinite(loss):
-                WanDBHandler.log_metrics(
-                    {"train/nonfinite_loss_steps": 1}, step=self.global_step
-                )
-                print("Non‑finite loss encountered. Skipping step.")
-                self.optimizer.zero_grad(set_to_none=True)
-                break
+            if step_in_epoch < 3:
+                continue
 
-            if self.use_amp:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
-
-            if self.grad_clip_norm is not None:
-                if self.use_amp:
-                    self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    max_norm=self.grad_clip_norm,
-                )
-
-            if self.use_amp:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                self.optimizer.step()
-
-            if self.scheduler is not None:
-                self.scheduler.step()
-
-            loss_item = loss.item()
-            epoch_loss += loss_item * B
-            running_loss += loss_item * B
-            running_examples += B
-
-            self.global_step += 1
-
-            if self.global_step % self.log_every_n_steps == 0:
-                step_end = time.time()
-                step_time = step_end - step_start
-
-                grad_norm = -float("inf")
-                if self.log_grad_norm:
-                    grad_norm = compute_total_grad_norm(self.model)
-
-                avg_running_loss = running_loss / max(1, running_examples)
-                current_lr = (
-                    self.scheduler.get_last_lr()[0]
-                    if self.scheduler is not None
-                    else self.optimizer.param_groups[0]["lr"]
-                )
-
-                print(
-                    f"\nGlobal step {self.global_step} "
-                    f"grad_norm {grad_norm:.8f} "
-                    f"loss_step: {avg_running_loss:.8f} "
-                    f"lr: {current_lr:.8f} "
-                    f"step_time {step_time}"
-                )
-
-                WanDBHandler.log_metrics(
-                    metrics={
-                        "epoch": epoch,
-                        "train/loss_step": avg_running_loss,
-                        "train/step_in_epoch": step_in_epoch,
-                        "train/grad_norm": grad_norm,
-                        "train/lr": current_lr,
-                        "train/step_time": step_time,
-                        "train/pos_score_mean": (
-                            (scores[:B].detach().clamp(-20.0, 20.0)).mean().item()
-                            if B > 0
-                            else 0.0
-                        ),
-                        "train/neg_score_mean": (
-                            (
-                                scores[B:]
-                                .view(B, self.num_neg)
-                                .detach()
-                                .clamp(-20.0, 20.0)
-                            )
-                            .mean()
-                            .item()
-                            if (scores.numel() - B) > 0
-                            else 0.0
-                        ),
-                    },
-                    step=self.global_step,
-                )
-                running_loss = 0.0
-                running_examples = 0
-
-            if (
-                self.eval_every_n_steps is not None
-                and self.global_step % self.eval_every_n_steps == 0
-            ):
-                avg_train_loss = epoch_loss / len(self.train_dataset)
-                should_stop = self._run_eval_and_maybe_early_stop(
-                    epoch=epoch,
-                    avg_train_loss=avg_train_loss,
-                    step_based=True,
-                )
-                if should_stop:
-                    break
+            break
+            # loss = self.loss.prepare_scores_and_compute_loss(
+            #     pos_score=pos_score, neg_score=neg_score
+            # )            #
+            # if not torch.isfinite(loss):
+            #     self.log_adapter.log_metrics(
+            #         {"train/nonfinite_loss_steps": 1}, step=self.global_step
+            #     )
+            #     print("Non‑finite loss encountered. Skipping step.")
+            #     break
+            #
+            # loss.backward()
+            #
+            # if self.grad_clip_norm is not None:
+            #     torch.nn.utils.clip_grad_norm_(
+            #         self.model.parameters(),
+            #         max_norm=self.grad_clip_norm,
+            #     )
+            #
+            # self.optimizer.step()
+            #
+            # if self.training_scheduler.scheduler is not None:
+            #     self.training_scheduler.scheduler.step()
+            #
+            # # [TransE] Stabilizacja skali: normalizacja wektorów relacji po kroku
+            # if getattr(self, "scorer_type", "").lower() == "transe":
+            #     with torch.no_grad():
+            #         # self.model.scorer.rel_emb: nn.Embedding
+            #         w = self.model.scorer.rel_emb.weight
+            #         self.model.scorer.rel_emb.weight.copy_(
+            #             torch.nn.functional.normalize(w, p=2, dim=-1)
+            #         )
+            #
+            # loss_item = loss.item()
+            # epoch_loss += loss_item * pos_examples_in_batch
+            # running_loss += loss_item * pos_examples_in_batch
+            # running_examples += pos_examples_in_batch
+            #
+            # self.global_step += 1
+            #
+            # if self.global_step % self.log_every_n_steps == 0:
+            #     step_end = time.time()
+            #     step_time = step_end - step_start_time
+            #
+            #     grad_norm = -float("inf")
+            #     if self.log_grad_norm:
+            #         grad_norm = compute_total_grad_norm(self.model)
+            #
+            #     avg_running_loss = running_loss / max(1, running_examples)
+            #     current_lr = (
+            #         self.scheduler.get_last_lr()[0]
+            #         if self.scheduler is not None
+            #         else self.optimizer.param_groups[0]["lr"]
+            #     )
+            #
+            #     # TransE translation error na batchu (pozytywy)
+            #     transe_err_batch = None
+            #     # transe_err_batch = self._compute_transe_translation_error(
+            #     #     src_ids=src_ids, rel_ids=rel_ids, dst_ids=dst_ids, pos_examples_in_batch=pos_examples_in_batch
+            #     # )
+            #
+            #     print(
+            #         f"\nGlobal step {self.global_step} "
+            #         f"grad_norm {grad_norm:.8f} "
+            #         f"loss_step: {avg_running_loss:.8f} "
+            #         f"lr: {current_lr:.8f} "
+            #         f"step_time {step_time}"
+            #     )
+            #
+            #     metrics = {
+            #         "epoch": epoch,
+            #         "train/loss_step": avg_running_loss,
+            #         "train/step_in_epoch": step_in_epoch,
+            #         "train/grad_norm": grad_norm,
+            #         "train/lr": current_lr,
+            #         "train/step_time": step_time,
+            #         "train/pos_score_mean": (
+            #             (scores[:pos_examples_in_batch].detach().clamp(-20.0, 20.0))
+            #             .mean()
+            #             .item()
+            #             if B > 0
+            #             else 0.0
+            #         ),
+            #         "train/neg_score_mean": (
+            #             (
+            #                 scores[pos_examples_in_batch:]
+            #                 .view(pos_examples_in_batch, self.num_neg)
+            #                 .detach()
+            #                 .clamp(-20.0, 20.0)
+            #             )
+            #             .mean()
+            #             .item()
+            #             if (scores.numel() - pos_examples_in_batch) > 0
+            #             else 0.0
+            #         ),
+            #     }
+            #     if transe_err_batch is not None:
+            #         metrics["train/transe_trans_error"] = transe_err_batch
+            #
+            #     self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
+            #
+            #     # Step end hook with context
+            #     self.on_step_end(
+            #         step=self.global_step,
+            #         epoch=epoch,
+            #         metrics={
+            #             "loss_step": avg_running_loss,
+            #             "grad_norm": grad_norm,
+            #             "lr": current_lr,
+            #             "step_time": step_time,
+            #             **(
+            #                 {"transe_trans_error": transe_err_batch}
+            #                 if transe_err_batch is not None
+            #                 else {}
+            #             ),
+            #         },
+            #     )
+            #
+            #     running_loss = 0.0
+            #     running_examples = 0
+            #
+            # if (
+            #     self.eval_every_n_steps is not None
+            #     and self.global_step % self.eval_every_n_steps == 0
+            # ):
+            #     avg_train_loss = epoch_loss / len(self.dataset.train_dataset)
+            #     should_stop = self._run_eval_and_maybe_early_stop(
+            #         epoch=epoch,
+            #         avg_train_loss=avg_train_loss,
+            #         step_based=True,
+            #     )
+            #     if should_stop:
+            #         break
+            #     # Change model to `train` mode
+            #     self.model.train()
 
         return epoch_loss, running_loss, running_examples
 
-    def _save_checkpoint(self, subdir: str) -> str:
-        """
-        Saves model state_dict into self.save_dir/subdir/OUT_MODEL_NAME
-        Also save:
-            - run config
-            - relations mapping
-
-        Returns saved file (model) path.
-        """
-        return self._save_model_and_files(
-            subdir=subdir,
-            model=self.model,
-            files=[
-                (
-                    ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME,
-                    self.run_config,
-                ),
-                (
-                    ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
-                    self.rel2idx,
-                ),
-            ],
-        )
-
-    def _forward_scores(
+    def _forward_model_scores(
         self,
         src_ids: torch.Tensor,
         rel_ids: torch.Tensor,
@@ -506,9 +557,10 @@ class RelGATTrainer(
         phase: 'train' or 'eval' (affects metric names)
         """
         scores = self.model(src_ids, rel_ids, dst_ids)
+
         nonfinite = (~torch.isfinite(scores)).sum().item()
         if nonfinite > 0:
-            WanDBHandler.log_metrics(
+            self.log_adapter.log_metrics(
                 {f"{phase}/nonfinite_scores": nonfinite},
                 step=self.global_step,
             )
@@ -516,13 +568,16 @@ class RelGATTrainer(
         return scores
 
     def _split_scores(
-        self, scores: torch.Tensor, B: int
+        self, scores: torch.Tensor, pos_examples_in_batch: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Split flat scores into pos [B] and neg [B, num_neg]
+        Split flat scores into pos [pos_examples_in_batch] and neg [num_neg]
         """
-        pos_score = scores[:B]
-        neg_score = scores[B:].view(B, self.num_neg)
+        pos_score = scores[:pos_examples_in_batch]
+        neg_score = scores[pos_examples_in_batch:].view(
+            pos_examples_in_batch, self.dataset.num_neg
+        )
+
         return pos_score, neg_score
 
     def _print_and_log_eval(
@@ -543,19 +598,18 @@ class RelGATTrainer(
             )
         else:
             print(f"\n=== Epoch {epoch:02d} – train loss: {avg_train_loss:.4f}")
+
         print(f"   - eval – loss: {eval_loss:.4f} | " f"MRR: {mrr:.4f} | {hits_str}")
 
-        WanDBHandler.log_metrics(
-            metrics={
-                "epoch": epoch,
-                "eval/loss": eval_loss,
-                "eval/mrr": mrr,
-                "eval/hits@1": hits.get(1, 0.0),
-                "eval/hits@2": hits.get(2, 0.0),
-                "eval/hits@3": hits.get(3, 0.0),
-            },
-            step=self.global_step,
-        )
+        metrics = {
+            "epoch": epoch,
+            "eval/loss": eval_loss,
+            "eval/mrr": mrr,
+        }
+        for ks in hits.keys():
+            metrics[f"eval/hits@{ks}"] = hits.get(ks, 0.0)
+
+        self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
 
     def _on_eval_end(self, mrr: float) -> bool:
         """
@@ -572,7 +626,8 @@ class RelGATTrainer(
                 self.best_ckpt_dir = f"best_checkpoint_{self.global_step}"
                 self._save_checkpoint(subdir=self.best_ckpt_dir)
                 self._prune_checkpoints()
-                WanDBHandler.log_metrics(
+
+                self.log_adapter.log_metrics(
                     metrics={"checkpoint/step": self.global_step},
                     step=self.global_step,
                 )
@@ -601,7 +656,9 @@ class RelGATTrainer(
         """
         Run evaluation, log once, update best/early-stop. Returns True if training should stop.
         """
-        mrr, hits, eval_loss = self.evaluate(ks=(1, 2, 3))
+        # Use default eval_ks unless overridden here
+        ks = tuple(sorted(set(self.eval_ks if self.eval_ks else (1, 2, 3))))
+        mrr, hits, eval_loss = self.evaluate(ks=ks)
         self._print_and_log_eval(
             epoch=epoch,
             avg_train_loss=avg_train_loss,
@@ -612,36 +669,96 @@ class RelGATTrainer(
         )
         return self._on_eval_end(mrr)
 
-    def _num_warmup_total_steps(self, epochs: int):
-        steps_per_epoch = max(
-            1, math.ceil(len(self.train_dataset) / self.train_batch_size)
+    #
+    # def _compute_transe_translation_error(
+    #     self,
+    #     *,
+    #     src_ids: torch.Tensor,
+    #     rel_ids: torch.Tensor,
+    #     dst_ids: torch.Tensor,
+    #     B: int,
+    # ) -> Optional[float]:
+    #     """
+    #     Średni błąd translacji dla TransE na pozytywach w batchu:
+    #         mean(|| src_emb + rel_emb - dst_emb ||_2)
+    #     Zwraca None, jeśli bieżący scorer nie jest TransE albo brak rel_emb.
+    #     """
+    #     # Logujemy tylko dla TransE
+    #     if getattr(self, "scorer_type", "").lower() != "transe":
+    #         return None
+    #
+    #     # Spodziewamy się, że model posiada scorer z rel_emb
+    #     scorer = getattr(self.model, "scorer", None)
+    #     rel_table = getattr(scorer, "rel_emb", None)
+    #     if scorer is None or rel_table is None:
+    #         return None
+    #
+    #     # Pozytywne przykłady to pierwsze B elementów
+    #     pos_src_ids = src_ids[:B].view(B)
+    #     pos_rel_ids = rel_ids[:B].view(B)
+    #     pos_dst_ids = dst_ids[:B].view(B)
+    #
+    #     # Pobranie embeddingów węzłów (z macierzy bazowej)
+    #     #   + upewniamy się, że tensory są na tym samym urządzeniu
+    #     node_mat = self.node_emb_matrix.to(self.device)
+    #     src_emb = node_mat[pos_src_ids]
+    #     dst_emb = node_mat[pos_dst_ids]
+    #
+    #     # Embedding relacji z tabeli scorer'a
+    #     rel_emb = rel_table(pos_rel_ids)
+    #
+    #     # Oblicz translację i jej normę L2
+    #     trans = src_emb + rel_emb - dst_emb
+    #
+    #     # Sanitizacja (w razie NaN/Inf)
+    #     trans = torch.nan_to_num(trans, nan=0.0, neginf=0.0, posinf=0.0)
+    #     err = torch.norm(trans, p=2, dim=-1).mean().item()
+    #     return float(err)
+
+    def _log_metrics_on_begining(self):
+        self.log_adapter.log_metrics(
+            metrics={
+                "scheduler/total_steps": self.training_scheduler.total_steps,
+                "scheduler/warmup_steps": self.training_scheduler.warmup_steps,
+                "scheduler/type": self.training_scheduler.scheduler_type,
+                "config/use_self_adv_neg": float(self.use_self_adv_neg),
+                "config/self_adv_alpha": float(self.self_adv_alpha),
+                "train/base_lr": self.training_scheduler.base_lr,
+                "config/eval_vectorized": float(self.eval_vectorized),
+            },
+            step=self.global_step,
         )
-        total_steps = steps_per_epoch * max(1, int(epochs))
-        warmup_steps = self.run_config.get("warmup_steps", self.warmup_steps)
-        if warmup_steps is None:
-            warmup_steps = int(self.default_warmup_ratio * total_steps)
-        warmup_steps = min(warmup_steps, max(0, total_steps - 1))
-        return warmup_steps, total_steps
 
-    def _prepare_run_name(
-        self, run_name: Optional[str], architecture_name: Optional[str]
-    ) -> str:
-        """
-        Prepare a run name in the form: '{model-name}-{architecture_name}-YYYYMMDD_HHMMSS'.
+    def _save_checkpoint(self, subdir: Optional[str]) -> str:
+        if subdir is None:
+            subdir = (
+                f"relgat_"
+                f"scorer-{self.architecture.scorer_type}_"
+                f"lrscheduler-{self.training_scheduler.scheduler_type}"
+            )
 
-        If architecture_name is None or empty, 'run' is used as a default prefix.
-        """
-        if run_name is None:
-            run_name = self.run_config.get("run_name")
+        return self.storage.save_model_and_files(
+            subdir=subdir,
+            model=self.model,
+            files=[
+                (
+                    ConstantsRelGATTrainer.Default.TRAINING_CONFIG_FILE_NAME,
+                    self.run_config,
+                ),
+                (
+                    ConstantsRelGATTrainer.Default.TRAINING_CONFIG_REL_TO_IDX,
+                    self.dataset.rel2idx,
+                ),
+            ],
+        )
 
-        prefix = ""
-        if run_name is not None and len(run_name.strip()):
-            prefix = run_name.strip()
-        else:
-            base_model_name = self.run_config.get("base_model_name", "")
-            if base_model_name is not None and len(base_model_name):
-                prefix = base_model_name.strip() + "-"
-            prefix += architecture_name if architecture_name else "run"
-
-        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{prefix}-{date_str}"
+    def _eval_if_needed_and_stop_if_needed(self, epoch, epoch_loss):
+        should_stop = False
+        if self.eval_every_n_steps is None:
+            avg_train_loss = epoch_loss / len(self.dataset.train_dataset)
+            should_stop = self._run_eval_and_maybe_early_stop(
+                epoch=epoch,
+                avg_train_loss=avg_train_loss,
+                step_based=False,
+            )
+        return should_stop

@@ -39,7 +39,7 @@ class DistMultScorer(nn.Module):
     torch.Size([32])
     """
 
-    def __init__(self, num_rel: int, rel_dim: int = 200):
+    def __init__(self, num_rel: int, rel_dim: int):
         """
         Initialize the DistMult scorer.
 
@@ -120,7 +120,7 @@ class TransEScorer(nn.Module):
     torch.Size([32])
     """
 
-    def __init__(self, num_rel: int, rel_dim: int = 200):
+    def __init__(self, num_rel: int, rel_dim: int):
         """
         Initialize the TransE scorer.
 
