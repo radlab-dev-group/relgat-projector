@@ -82,12 +82,13 @@ class RelGATMainTrainerHandler:
             "save_every_n_steps": args.save_every_n_steps,
             "eval_every_n_steps": args.eval_every_n_steps,
             # Additional training args
-            "use_amp": args.use_amp,
+            # "use_amp": args.use_amp,
             "disable_edge_type_mask": args.disable_edge_type_mask,
             "use_self_adv_neg": args.use_self_adv_neg,
             "self_adv_alpha": args.self_adv_alpha,
             "weight_decay": args.weight_decay,
             "grad_clip_norm": args.grad_clip_norm,
+            "eval_vectorized": True,
         }
 
         trainer = RelGATTrainer(
@@ -129,11 +130,13 @@ class RelGATMainTrainerHandler:
             log_grad_norm=True,
             log_every_n_steps=run_cfg["log_every_n_steps"],
             # Additional params
-            use_amp=run_cfg["use_amp"],
+            # use_amp=run_cfg["use_amp"],
             weight_decay=run_cfg["weight_decay"],
             grad_clip_norm=run_cfg["grad_clip_norm"],
             disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
             use_self_adv_neg=run_cfg["use_self_adv_neg"],
             self_adv_alpha=run_cfg["self_adv_alpha"],
+            eval_vectorized=run_cfg["eval_vectorized"],
+            eval_ks=(1, 2, 3, 4, 5),
         )
         return trainer
