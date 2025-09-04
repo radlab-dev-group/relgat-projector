@@ -1,4 +1,10 @@
-# RelGAT Trainer
+# RekGAT Projector with RelGAT trainer
+This repository provides a hybrid Relational-GAT model with a projection head back to the input embedding space, 
+enabling relation-specific operators (TransE/DistMult) to be applied consistently inside and outside the graph. 
+The model supports inductive embedding imputation for nodes without vectors and relation-driven query expansion 
+by composing operators along graph paths—all in the same embedding space used within retriever. 
+Includes multi-objective training (ranking + reconstruction), metrics (MRR/Hits, cosine, MSE), and utilities for inference and export.
+
 
 A lightweight trainer for Relational Graph Attention Networks (RelGAT) that learns 
 relation-aware node representations from a knowledge graph. It consumes precomputed 
