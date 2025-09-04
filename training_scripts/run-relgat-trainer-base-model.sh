@@ -21,49 +21,49 @@ ARCHITECTURE="small"
 # =============================================================================
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
-  EPOCHS=20
-  BATCH_SIZE=256
-  NUM_NEG_TO_POS=32
+  EPOCHS=60
+  BATCH_SIZE=64
+  NUM_NEG_TO_POS=12
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
-  NUM_OF_HEADS=12
+  NUM_OF_HEADS=8
 
-  LEARNING_RATE=0.00002
+  LEARNING_RATE=0.00009
 
   SAVE_N_STEPS=100
   EVAL_N_STEPS=100
   LOG_EVERY_N_STEPS=10
-elif [[ "${ARCHITECTURE}" == "medium" ]]
-then
-  EPOCHS=10
-  BATCH_SIZE=128
-  NUM_NEG_TO_POS=24
-
-  LEARNING_RATE=0.0002
-
-  GAT_OUT_DIM=256
-  NUM_OF_LAYERS=1
-  NUM_OF_HEADS=12
-
-  SAVE_N_STEPS=200
-  EVAL_N_STEPS=200
-  LOG_EVERY_N_STEPS=5
-elif [[ "${ARCHITECTURE}" == "large" ]]
-then
-  EPOCHS=50
-  BATCH_SIZE=128
-  NUM_NEG_TO_POS=32
-
-  LEARNING_RATE=0.00005
-
-  GAT_OUT_DIM=256
-  NUM_OF_LAYERS=4
-  NUM_OF_HEADS=12
-
-  SAVE_N_STEPS=400
-  EVAL_N_STEPS=400
-  LOG_EVERY_N_STEPS=5
+#elif [[ "${ARCHITECTURE}" == "medium" ]]
+#then
+#  EPOCHS=10
+#  BATCH_SIZE=128
+#  NUM_NEG_TO_POS=24
+#
+#  LEARNING_RATE=0.0002
+#
+#  GAT_OUT_DIM=256
+#  NUM_OF_LAYERS=2
+#  NUM_OF_HEADS=12
+#
+#  SAVE_N_STEPS=200
+#  EVAL_N_STEPS=200
+#  LOG_EVERY_N_STEPS=5
+#elif [[ "${ARCHITECTURE}" == "large" ]]
+#then
+#  EPOCHS=50
+#  BATCH_SIZE=128
+#  NUM_NEG_TO_POS=32
+#
+#  LEARNING_RATE=0.00005
+#
+#  GAT_OUT_DIM=256
+#  NUM_OF_LAYERS=4
+#  NUM_OF_HEADS=12
+#
+#  SAVE_N_STEPS=400
+#  EVAL_N_STEPS=400
+#  LOG_EVERY_N_STEPS=5
 else
   echo "Supported architectures: [small, medium, large]"
   exit 1
@@ -88,7 +88,7 @@ LR_SCHEDULER="linear"
 # Optional explicit warmup steps (comment out to auto-compute)
 # WARMUP_STEPS=500
 # weight decay (0.0 is default) - used in Adam optimizer
-WEIGHT_DECAY=0.0
+WEIGHT_DECAY=0.0001
 
 # If set, clips gradient norm to this value (default: None – no clipping)
 #GRADIENT_CLIPPING=10.0
