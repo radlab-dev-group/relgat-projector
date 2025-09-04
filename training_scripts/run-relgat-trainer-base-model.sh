@@ -23,11 +23,11 @@ if [[ "${ARCHITECTURE}" == "small" ]]
 then
   EPOCHS=60
   BATCH_SIZE=64
-  NUM_NEG_TO_POS=8
+  NUM_NEG_TO_POS=12
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
-  NUM_OF_HEADS=12
+  NUM_OF_HEADS=8
 
   LEARNING_RATE=0.00009
 
@@ -71,7 +71,7 @@ fi
 
 # =============================================================================
 # Scorer, one of: [distmult, transe]
-SCORER="distmult"
+SCORER="transe"
 
 # Dropout used while training (on embedder dimension)
 DROPOUT=0.3

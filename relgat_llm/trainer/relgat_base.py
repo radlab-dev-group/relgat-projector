@@ -458,14 +458,23 @@ class RelGATTrainer:
         return scores
 
     def _split_scores(
-        self, scores: torch.Tensor, pos_examples_in_batch: int
+            self, scores: torch.Tensor, pos_examples_in_batch: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Split flat scores into pos [pos_examples_in_batch] and neg [num_neg]
         """
         pos_score = scores[:pos_examples_in_batch]
-        neg_score = scores[pos_examples_in_batch:].view(
-            pos_examples_in_batch, self.dataset.num_neg
+        neg_flat = scores[pos_examples_in_batch:]
+
+        # Negatives in the batch are organized in blocks of "k", meaning:
+        #   [neg_k=0 for the entire batch]
+        #   [neg_k=1 for the entire batch]
+        #   ...
+        # Therefore, they need to be transformed into [B, K], not just .view(B, K).
+        neg_score = (
+            neg_flat.view(self.dataset.num_neg, pos_examples_in_batch)
+            .transpose(0, 1)
+            .contiguous()
         )
         return pos_score, neg_score
 
