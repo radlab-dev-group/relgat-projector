@@ -35,17 +35,19 @@ class RelGATLoss:
         pos_score: torch.Tensor,
         neg_score: torch.Tensor,
     ) -> torch.Tensor:
-        pos = torch.nan_to_num(
-            pos_score, nan=0.0, neginf=-self.clamp_limit, posinf=self.clamp_limit
-        ).clamp(-self.clamp_limit, self.clamp_limit)
-        neg = torch.nan_to_num(
-            neg_score, nan=0.0, neginf=-self.clamp_limit, posinf=self.clamp_limit
-        ).clamp(-self.clamp_limit, self.clamp_limit)
+        # UNCOMMENT NOTE GRADIENT TODO
+        # No change to finite scores
+        # pos = torch.nan_to_num(
+        #     pos_score, nan=0.0, neginf=-self.clamp_limit, posinf=self.clamp_limit
+        # ).clamp(-self.clamp_limit, self.clamp_limit)
+        # neg = torch.nan_to_num(
+        #     neg_score, nan=0.0, neginf=-self.clamp_limit, posinf=self.clamp_limit
+        # ).clamp(-self.clamp_limit, self.clamp_limit)
 
         if self.use_self_adv_neg:
-            return self._self_adversarial_loss(pos_s, neg_s, alpha=self_adv_alpha)
+            return self._self_adversarial_loss(pos_score, neg_score)
         else:
-            return self._margin_ranking_loss(pos_s, neg_s, margin=margin)
+            return self._margin_ranking_loss(pos_score, neg_score)
 
     def _margin_ranking_loss(self, pos_score: torch.Tensor, neg_score: torch.Tensor):
         pos = pos_score.unsqueeze(1).expand_as(neg_score)

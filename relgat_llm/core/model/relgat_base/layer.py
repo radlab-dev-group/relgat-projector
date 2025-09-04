@@ -248,10 +248,8 @@ class RelGATLayer(nn.Module):
         attn = []
         for h in range(self.heads):
             e_h = attn_scores[h]  # [E]
-
             # max per dst node
             # initialize tensors to -inf and fill the maximum for each dst node
-            N = node_emb.size(0)
             m = torch.full((N,), float("-inf"), device=e_h.device, dtype=e_h.dtype)
 
             # per-dst max update
@@ -263,6 +261,7 @@ class RelGATLayer(nn.Module):
             # stabilization: e' = e - m
             e_shift = e_h - m_e
             w = torch.exp(e_shift)
+
             denom = scatter_add(w, dst, dim=0, dim_size=N)  # [N]
             denom = denom.clamp_min(self.STABLE_SOFTMAX_EPS)
 

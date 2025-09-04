@@ -35,7 +35,15 @@ class TrainingScheduler:
             ConstantsRelGATTrainer.Default.DEFAULT_WARMUP_RATIO
         )
 
-    def prepare_lr_scheduler(self, optimizer):
+    def prepare(self, epochs: int, train_dataset, train_batch_size: int, optimizer):
+        self.__prepare_warmup_and_total_steps(
+            epochs=epochs,
+            train_dataset=train_dataset,
+            train_batch_size=train_batch_size,
+        )
+        self.__prepare_lr_scheduler(optimizer=optimizer)
+
+    def __prepare_lr_scheduler(self, optimizer):
         def _lr_lambda_linear(current_step: int):
             if current_step < self.warmup_steps:
                 return float(current_step) / float(max(1, self.warmup_steps))
@@ -85,7 +93,7 @@ class TrainingScheduler:
                 optimizer, lr_lambda=lr_lambda
             )
 
-    def prepare_warmup_and_total_steps(
+    def __prepare_warmup_and_total_steps(
         self, epochs: int, train_dataset, train_batch_size: int
     ):
         steps_per_epoch = max(1, math.ceil(len(train_dataset) / train_batch_size))
