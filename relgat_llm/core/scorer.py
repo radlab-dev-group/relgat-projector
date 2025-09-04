@@ -160,8 +160,6 @@ class TransEScorer(nn.Module):
         # [B, D] shape
         rel_emb = self.rel_emb(rel_ids)
 
-        print(rel_emb[0].shape)
-
         # L2 distance
         distance = torch.norm(src_emb + rel_emb - dst_emb, p=2, dim=-1)
 
