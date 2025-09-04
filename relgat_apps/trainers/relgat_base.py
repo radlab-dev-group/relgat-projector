@@ -20,8 +20,8 @@ plwordnet-milvus \
 
 import argparse
 
-from relgat_llm.trainer.main.part.relgat import RelGATMainTrainerHandler
-from relgat_llm.trainer.main.part.constants import ConstantsRelGATTrainer
+from relgat_llm.base.constants import ConstantsRelGATTrainer
+from relgat_llm.handlers.models.relgat import RelGATMainTrainerHandler
 
 
 def get_args() -> argparse.Namespace:
@@ -221,14 +221,14 @@ def get_args() -> argparse.Namespace:
         default=42,
         help="Random seed for reproducibility (default: 42)",
     )
-
-    # mixed precision
-    parser.add_argument(
-        "--use-amp",
-        dest="use_amp",
-        action="store_true",
-        help="Enable Automatic Mixed Precision (AMP) training",
-    )
+    #
+    # # mixed precision
+    # parser.add_argument(
+    #     "--use-amp",
+    #     dest="use_amp",
+    #     action="store_true",
+    #     help="Enable Automatic Mixed Precision (AMP) training",
+    # )
 
     # Saving model to dir
     parser.add_argument(
@@ -329,10 +329,7 @@ def main() -> None:
         args=args,
     )
 
-    trainer.train(
-        epochs=args.epochs,
-        margin=args.margin,
-    )
+    trainer.train(epochs=args.epochs)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from relgat_llm.trainer.relation.layer import RelGATLayer
-from relgat_llm.trainer.relation.scorer import DistMultScorer, TransEScorer
+from relgat_llm.core.scorer import DistMultScorer, TransEScorer
+from relgat_llm.core.model.relgat_base.layer import RelGATLayer
 
 
 class RelGATModel(nn.Module):
@@ -21,12 +21,13 @@ class RelGATModel(nn.Module):
     ):
         super().__init__()
         self.register_buffer("node_emb_fixed", node_emb)  # not a Parameter
+
         self.edge_index = edge_index
         self.edge_type = edge_type
         self.gat_num_layers = gat_num_layers
 
         if gat_num_layers == 1:
-            self.gat = RelGATLayer(
+            self.gat_layer = RelGATLayer(
                 in_dim=node_emb.size(1),
                 out_dim=gat_out_dim,
                 num_rel=num_rel,
@@ -56,6 +57,7 @@ class RelGATModel(nn.Module):
                 in_dim = gat_out_dim * gat_heads
             self.act = nn.ELU()
 
+        self.scorer_type = scorer_type
         scorer_dim = gat_out_dim * gat_heads
         if scorer_type.lower() == "distmult":
             self.scorer = DistMultScorer(num_rel, rel_dim=scorer_dim)
@@ -86,18 +88,28 @@ class RelGATModel(nn.Module):
             Compatibility scores (higher ⇒ more plausible).
         """
         if self.gat_num_layers == 1:
-            x = self.gat(
+            x = self.gat_layer(
                 self.node_emb_fixed, self.edge_index, self.edge_type
             )  # [N, D']
         else:
-            x = self.node_emb_fixed
-            for li, gat in enumerate(self.gat_layers):
-                x = gat(x, self.edge_index, self.edge_type)  # [N, D']
-                if li < len(self.gat_layers) - 1:
-                    x = self.act(x)
+            # x = self.node_emb_fixed
+            # for li, gat in enumerate(self.gat_layers):
+            #     x = gat(x, self.edge_index, self.edge_type)  # [N, D']
+            #     if li < len(self.gat_layers) - 1:
+            #         x = self.act(x)
+            raise Exception("Trzeba sprawdzić!")
 
         src_vec = x[src_ids]  # [B, D']
         dst_vec = x[dst_ids]  # [B, D']
+
+        # print("Source vectors")
+        # print(src_vec)
+        # print("Destination vectors")
+        # print(dst_vec)
+
+        # # print(x)
+        # print("node_emb_fixed=", self.node_emb_fixed.shape)
+        # print("x.shape=", x.shape)
 
         scores = self.scorer(src_vec, rel_ids, dst_vec)  # [B]
         return scores

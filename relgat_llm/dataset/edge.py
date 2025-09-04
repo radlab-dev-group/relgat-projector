@@ -1,6 +1,7 @@
 import torch
 import random
 
+from typing import Tuple
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -84,15 +85,14 @@ class EdgeDataset(Dataset):
             and the following elements are tuples for each negative sample
             ``(src_emb, rel_id, corrupt_dst_emb, torch.tensor(0.0))``.
         """
-        src, dst, rel = self.edges[idx]
-        rel_id = self.rel2idx[rel] if isinstance(rel, str) else int(rel)
+        src, dst, rel_name = self.edges[idx]
+        rel_id = self.rel2idx[rel_name]
 
         # Positive example (rel_id as a long tensor with shape[1])
         pos = (
             torch.tensor([src], dtype=torch.long),
             torch.tensor([rel_id], dtype=torch.long),
             torch.tensor([dst], dtype=torch.long),
-            torch.tensor(1.0),
         )
 
         # Negative examples (corrupted destination)
@@ -102,12 +102,13 @@ class EdgeDataset(Dataset):
             corrupt_dst = random.choice(self.all_node_ids)
             while corrupt_dst == dst:
                 corrupt_dst = random.choice(self.all_node_ids)
+
             neg.append(
                 (
                     torch.tensor([src], dtype=torch.long),
                     torch.tensor([rel_id], dtype=torch.long),
                     torch.tensor([corrupt_dst], dtype=torch.long),
-                    torch.tensor(0.0),
+                    # torch.tensor(0.0),
                 )
             )
 

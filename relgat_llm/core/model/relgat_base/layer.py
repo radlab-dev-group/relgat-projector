@@ -9,7 +9,7 @@ from torch_scatter import scatter_add
 class RelGATLayer(nn.Module):
     """
     One relational‑GAT layer with multi‑head attention.
-    - `in_dim`  : dimension of *input* node vectors (1152 in your case)
+    - `in_dim`  : dimension of *input* node vectors (1152 in our case)
     - `out_dim` : dimension of *output* node vectors (e.g. 200)
     - `num_rel` : number of distinct relation types (≈40‑50)
     - `heads`   : number of attention heads
@@ -81,6 +81,8 @@ class RelGATLayer(nn.Module):
         >>> out.shape
         torch.Size([1000, 800])   # 4 heads × 200 features each
     """
+
+    STABLE_SOFTMAX_EPS = 1e-16
 
     def __init__(
         self,
@@ -215,7 +217,7 @@ class RelGATLayer(nn.Module):
         # 1. Project node vectors for each head
         # proj_src[h] : [E, out_dim]
         proj_src = [lin(node_emb)[src] for lin in self.proj]  # list of length heads
-        proj_dst = [lin(node_emb)[dst] for lin in self.proj]
+        # proj_dst = [lin(node_emb)[dst] for lin in self.proj]
 
         # 2. Compute un‑normalized attention
         # For head h:  e_ij = (proj_src_h ⊙ a_h[rel]) · 1   (LeakyReLU)
@@ -223,6 +225,7 @@ class RelGATLayer(nn.Module):
         for h in range(self.heads):
             # a_h[rel] : [E, out_dim]
             rel_att = self.attn_vec[h][edge_type]  # gather per edge
+
             # element‑wise product then sum over feature dim
             e = (proj_src[h] * rel_att).sum(dim=-1)  # [E]
             e = F.leaky_relu(e, negative_slope=0.2)
@@ -242,33 +245,38 @@ class RelGATLayer(nn.Module):
         # 3. Stable softmax over neighbours (per destination)
         # Instead of using exp directly,
         # we subtract the per-dst maximum to stabilize the softmax.
-        H = self.heads
-        eps = 1e-16
         attn = []
-        for h in range(H):
+        for h in range(self.heads):
             e_h = attn_scores[h]  # [E]
             # max per dst node
             # initialize tensors to -inf and fill the maximum for each dst node
-            N = node_emb.size(0)
             m = torch.full((N,), float("-inf"), device=e_h.device, dtype=e_h.dtype)
+
             # per-dst max update
             m.index_copy_(0, dst, torch.maximum(m[dst], e_h))
+
             # gather m for edges
             m_e = m[dst]
+
             # stabilization: e' = e - m
             e_shift = e_h - m_e
             w = torch.exp(e_shift)
+
             denom = scatter_add(w, dst, dim=0, dim_size=N)  # [N]
-            denom = denom.clamp_min(eps)
+            denom = denom.clamp_min(self.STABLE_SOFTMAX_EPS)
+
             alpha = w / denom[dst]  # [E]
+
             # optional dropout on attention weights (on edges)
             if self.rel_attn_drop.p > 0.0:
                 alpha = self.rel_attn_drop(alpha)
+
             attn.append(alpha)
 
         # 4. Message passing
         # Multiply source projection by attention weight
         msgs = [proj_src[h] * attn[h].unsqueeze(-1) for h in range(self.heads)]
+
         # Aggregate messages per destination node
         out = [
             scatter_add(msg, dst, dim=0, dim_size=N) for msg in msgs
