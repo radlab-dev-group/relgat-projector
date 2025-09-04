@@ -224,15 +224,6 @@ class RelGATTrainer:
         # W&B initialization
         self.log_adapter.init_wandb_if_needed()
 
-    def on_step_end(
-        self, *, step: int, epoch: int, metrics: Dict[str, float]
-    ) -> None:
-        """
-        Callback executed at the end of logging step during training.
-        Default: no-op. Override to inject custom behavior.
-        """
-        return
-
     def on_epoch_end(self, *, epoch: int) -> None:
         """
         Callback executed at the end of each training epoch.
@@ -240,106 +231,87 @@ class RelGATTrainer:
         """
         return
 
-    #
-    # def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
-    #     self.model.eval()
-    #
-    #     ks = tuple(sorted(set(ks)))  # sanitize
-    #     total_mrr = 0.0
-    #     total_hits = {k: 0.0 for k in ks}
-    #     n_examples = 0
-    #     total_loss = 0.0
-    #     total_pos = 0
-    #     # Akumulator błędu translacji TransE (jeśli dotyczy)
-    #     transe_err_sum = 0.0
-    #
-    #     with torch.no_grad():
-    #         for batch in tqdm(self.eval_loader, desc="Evaluation", leave=False):
-    #             if not batch:
-    #                 continue
-    #             pos, *negs = zip(*batch)
-    #             src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
-    #                 pos, negs, device=self.device
-    #             )
-    #
-    #             pos_examples_in_batch = len(pos)
-    #
-    #             scores = self._forward_model_scores(
-    #                 src_ids, rel_ids, dst_ids, phase="eval"
-    #             )  # [B*(1+num_neg)]
-    #             pos_score, neg_score = self._split_scores(
-    #                 scores, pos_examples_in_batch
-    #             )
-    #
-    #             # Loss for reporting
-    #             batch_loss = self.loss.prepare_scores_and_compute_loss(
-    #                 pos_score=pos_score, neg_score=neg_score
-    #             )
-    #             total_loss += batch_loss.item() * pos_examples_in_batch
-    #             total_pos += pos_examples_in_batch
-    #
-    #             # Metrics: vectorized or per-sample
-    #             if self.eval_vectorized:
-    #                 mrr_b, hits_b = RelgatEval.compute_batch_metrics_vectorized(
-    #                     pos_score=pos_score, neg_score=neg_score, ks=ks
-    #                 )
-    #                 total_mrr += mrr_b * pos_examples_in_batch
-    #                 for k in ks:
-    #                     total_hits[k] += hits_b[k] * pos_examples_in_batch
-    #                 n_examples += pos_examples_in_batch
-    #             else:
-    #                 for i in range(pos_examples_in_batch):
-    #                     cand_scores = torch.cat(
-    #                         [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
-    #                     )
-    #                     mrr, hits = RelgatEval.compute_mrr_hits(
-    #                         cand_scores, true_idx=0, ks=ks
-    #                     )
-    #                     total_mrr += mrr
-    #                     for k in ks:
-    #                         total_hits[k] += hits[k]
-    #                     n_examples += 1
-    #
-    #             # Optional evaluation logging of score statistics
-    #             self.log_adapter.log_metrics(
-    #                 metrics={
-    #                     "eval/pos_score_mean": (
-    #                         pos_score.detach().clamp(-20.0, 20.0).mean().item()
-    #                         if pos_examples_in_batch > 0
-    #                         else 0.0
-    #                     ),
-    #                     "eval/neg_score_mean": (
-    #                         neg_score.detach().clamp(-20.0, 20.0).mean().item()
-    #                         if pos_examples_in_batch > 0
-    #                         else 0.0
-    #                     ),
-    #                 },
-    #                 step=self.global_step,
-    #             )
-    #
-    #             # # TransE translation error (średnia po batchu, sumowana)
-    #             # transe_err_batch = None
-    #             # # transe_err_batch = self._compute_transe_translation_error(
-    #             # #     src_ids=src_ids, rel_ids=rel_ids, dst_ids=dst_ids, B=B
-    #             # # )
-    #             # if transe_err_batch is not None:
-    #             #     transe_err_sum += transe_err_batch * float(B)
-    #
-    #     n_examples = max(1, n_examples)
-    #     avg_mrr = total_mrr / n_examples
-    #     avg_hits = {k: total_hits[k] / n_examples for k in ks}
-    #     avg_eval_loss = total_loss / max(1, total_pos)
-    #
-    #     # Loguj średni błąd translacji TransE na eval (jeśli dotyczy)
-    #     if total_pos > 0 and transe_err_sum > 0.0:
-    #         self.log_adapter.log_metrics(
-    #             metrics={
-    #                 "eval/transe_trans_error": transe_err_sum / float(total_pos)
-    #             },
-    #             step=self.global_step,
-    #         )
-    #
-    #     return avg_mrr, avg_hits, avg_eval_loss
+    def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
+        self.model.eval()
+
+        ks = tuple(sorted(set(ks)))  # sanitize
+        total_mrr = 0.0
+        total_hits = {k: 0.0 for k in ks}
+        n_examples = 0
+        total_loss = 0.0
+        total_pos = 0
+
+        with torch.no_grad():
+            for batch in tqdm(
+                self.dataset.eval_loader, desc="Evaluation", leave=False
+            ):
+                if not batch:
+                    continue
+                pos, *negs = zip(*batch)
+                src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
+                    pos, negs, device=self.device
+                )
+
+                pos_examples_in_batch = len(pos)
+                scores = self._forward_model_scores(
+                    src_ids, rel_ids, dst_ids, phase="eval"
+                )
+                pos_score, neg_score = self._split_scores(
+                    scores, pos_examples_in_batch
+                )
+
+                # Loss for reporting
+                batch_loss = self.loss.prepare_scores_and_compute_loss(
+                    pos_score=pos_score, neg_score=neg_score
+                )
+                total_loss += batch_loss.item() * pos_examples_in_batch
+                total_pos += pos_examples_in_batch
+
+                # Metrics: vectorized or per-sample
+                if self.eval_vectorized:
+                    mrr_b, hits_b = RelgatEval.compute_batch_metrics_vectorized(
+                        pos_score=pos_score, neg_score=neg_score, ks=ks
+                    )
+                    total_mrr += mrr_b * pos_examples_in_batch
+                    for k in ks:
+                        total_hits[k] += hits_b[k] * pos_examples_in_batch
+                    n_examples += pos_examples_in_batch
+                else:
+                    for i in range(pos_examples_in_batch):
+                        cand_scores = torch.cat(
+                            [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
+                        )
+                        mrr, hits = RelgatEval.compute_mrr_hits(
+                            cand_scores, true_idx=0, ks=ks
+                        )
+                        total_mrr += mrr
+                        for k in ks:
+                            total_hits[k] += hits[k]
+                        n_examples += 1
+
+                # Optional evaluation logging of score statistics
+                self.log_adapter.log_metrics(
+                    metrics={
+                        "eval/pos_score_mean": (
+                            pos_score.detach().clamp(-20.0, 20.0).mean().item()
+                            if pos_examples_in_batch > 0
+                            else 0.0
+                        ),
+                        "eval/neg_score_mean": (
+                            neg_score.detach().clamp(-20.0, 20.0).mean().item()
+                            if pos_examples_in_batch > 0
+                            else 0.0
+                        ),
+                    },
+                    step=self.global_step,
+                )
+
+        n_examples = max(1, n_examples)
+        avg_mrr = total_mrr / n_examples
+        avg_hits = {k: total_hits[k] / n_examples for k in ks}
+        avg_eval_loss = total_loss / max(1, total_pos)
+
+        return avg_mrr, avg_hits, avg_eval_loss
 
     def train(self, epochs: int):
         # Prepare the number of total steps, warmup steps and learning scheduler
@@ -396,174 +368,70 @@ class RelGATTrainer:
             start=1,
         ):
             step_start_time = time.time()
-            if self.debug_mode:
-                print("#" * 200)
-                print("Step stared at timestamp", step_start_time)
 
             pos, *negs = zip(*batch)
-            # if self.debug_mode:
-            #     print("pos from batch=", pos)
-            #     print("neg from batch=", negs)
-
             pos_examples_in_batch = len(pos)
             src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
                 pos, negs, device=self.device
             )
-            # if self.debug_mode:
-            #     print("src_ids=", src_ids)
-            #     print("rel_ids=", rel_ids)
-            #     print("dst_ids=", dst_ids)
 
             self.optimizer.zero_grad(set_to_none=True)
             scores = self._forward_model_scores(
                 src_ids, rel_ids, dst_ids, phase="train"
             )
             pos_score, neg_score = self._split_scores(scores, pos_examples_in_batch)
-            if self.debug_mode:
-                print("num of pos examples  in batch=", pos_examples_in_batch)
-                print(f"pos_score {self.model.scorer_type} after model forward=", pos_score)
-                print(f"neg_score {self.model.scorer_type} after model forward=", neg_score)
 
-            break
             loss = self.loss.prepare_scores_and_compute_loss(
                 pos_score=pos_score, neg_score=neg_score
             )
-            if self.debug_mode:
-                print(f"loss {self.loss.loss_type}=", loss)
+            if not torch.isfinite(loss):
+                self.log_adapter.log_metrics(
+                    {"train/nonfinite_loss_steps": 1}, step=self.global_step
+                )
+                print("Non‑finite loss encountered. Skipping step.")
+                continue
+            loss.backward()
 
-            break
+            if self.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.grad_clip_norm,
+                )
 
-            # if not torch.isfinite(loss):
-            #     self.log_adapter.log_metrics(
-            #         {"train/nonfinite_loss_steps": 1}, step=self.global_step
-            #     )
-            #     print("Non‑finite loss encountered. Skipping step.")
-            #     break
-            #
-            # loss.backward()
-            #
-            # if self.grad_clip_norm is not None:
-            #     torch.nn.utils.clip_grad_norm_(
-            #         self.model.parameters(),
-            #         max_norm=self.grad_clip_norm,
-            #     )
-            #
-            # self.optimizer.step()
-            #
-            # if self.training_scheduler.scheduler is not None:
-            #     self.training_scheduler.scheduler.step()
-            #
-            # # [TransE] Stabilizacja skali: normalizacja wektorów relacji po kroku
-            # if getattr(self, "scorer_type", "").lower() == "transe":
-            #     with torch.no_grad():
-            #         # self.model.scorer.rel_emb: nn.Embedding
-            #         w = self.model.scorer.rel_emb.weight
-            #         self.model.scorer.rel_emb.weight.copy_(
-            #             torch.nn.functional.normalize(w, p=2, dim=-1)
-            #         )
-            #
-            # loss_item = loss.item()
-            # epoch_loss += loss_item * pos_examples_in_batch
-            # running_loss += loss_item * pos_examples_in_batch
-            # running_examples += pos_examples_in_batch
-            #
-            # self.global_step += 1
-            #
-            # if self.global_step % self.log_every_n_steps == 0:
-            #     step_end = time.time()
-            #     step_time = step_end - step_start_time
-            #
-            #     grad_norm = -float("inf")
-            #     if self.log_grad_norm:
-            #         grad_norm = compute_total_grad_norm(self.model)
-            #
-            #     avg_running_loss = running_loss / max(1, running_examples)
-            #     current_lr = (
-            #         self.scheduler.get_last_lr()[0]
-            #         if self.scheduler is not None
-            #         else self.optimizer.param_groups[0]["lr"]
-            #     )
-            #
-            #     # TransE translation error na batchu (pozytywy)
-            #     transe_err_batch = None
-            #     # transe_err_batch = self._compute_transe_translation_error(
-            #     #     src_ids=src_ids, rel_ids=rel_ids, dst_ids=dst_ids, pos_examples_in_batch=pos_examples_in_batch
-            #     # )
-            #
-            #     print(
-            #         f"\nGlobal step {self.global_step} "
-            #         f"grad_norm {grad_norm:.8f} "
-            #         f"loss_step: {avg_running_loss:.8f} "
-            #         f"lr: {current_lr:.8f} "
-            #         f"step_time {step_time}"
-            #     )
-            #
-            #     metrics = {
-            #         "epoch": epoch,
-            #         "train/loss_step": avg_running_loss,
-            #         "train/step_in_epoch": step_in_epoch,
-            #         "train/grad_norm": grad_norm,
-            #         "train/lr": current_lr,
-            #         "train/step_time": step_time,
-            #         "train/pos_score_mean": (
-            #             (scores[:pos_examples_in_batch].detach().clamp(-20.0, 20.0))
-            #             .mean()
-            #             .item()
-            #             if B > 0
-            #             else 0.0
-            #         ),
-            #         "train/neg_score_mean": (
-            #             (
-            #                 scores[pos_examples_in_batch:]
-            #                 .view(pos_examples_in_batch, self.num_neg)
-            #                 .detach()
-            #                 .clamp(-20.0, 20.0)
-            #             )
-            #             .mean()
-            #             .item()
-            #             if (scores.numel() - pos_examples_in_batch) > 0
-            #             else 0.0
-            #         ),
-            #     }
-            #     if transe_err_batch is not None:
-            #         metrics["train/transe_trans_error"] = transe_err_batch
-            #
-            #     self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
-            #
-            #     # Step end hook with context
-            #     self.on_step_end(
-            #         step=self.global_step,
-            #         epoch=epoch,
-            #         metrics={
-            #             "loss_step": avg_running_loss,
-            #             "grad_norm": grad_norm,
-            #             "lr": current_lr,
-            #             "step_time": step_time,
-            #             **(
-            #                 {"transe_trans_error": transe_err_batch}
-            #                 if transe_err_batch is not None
-            #                 else {}
-            #             ),
-            #         },
-            #     )
-            #
-            #     running_loss = 0.0
-            #     running_examples = 0
-            #
-            # if (
-            #     self.eval_every_n_steps is not None
-            #     and self.global_step % self.eval_every_n_steps == 0
-            # ):
-            #     avg_train_loss = epoch_loss / len(self.dataset.train_dataset)
-            #     should_stop = self._run_eval_and_maybe_early_stop(
-            #         epoch=epoch,
-            #         avg_train_loss=avg_train_loss,
-            #         step_based=True,
-            #     )
-            #     if should_stop:
-            #         break
-            #     # Change model to `train` mode
-            #     self.model.train()
+            self.optimizer.step()
+            if self.training_scheduler.scheduler is not None:
+                self.training_scheduler.scheduler.step()
+
+            # TransE stabilization of scale:
+            #   -> normalization of relation vectors after each step.
+            if getattr(self, "scorer_type", "").lower() == "transe":
+                with torch.no_grad():
+                    w = self.model.scorer.rel_emb.weight
+                    self.model.scorer.rel_emb.weight.copy_(
+                        torch.nn.functional.normalize(w, p=2, dim=-1)
+                    )
+
+            loss_item = loss.item()
+            epoch_loss += loss_item * pos_examples_in_batch
+            running_loss += loss_item * pos_examples_in_batch
+            running_examples += pos_examples_in_batch
+
+            self.global_step += 1
+
+            running_loss, running_examples = self._log_step_if_needed(
+                epoch=epoch,
+                step_in_epoch=step_in_epoch,
+                step_start_time=step_start_time,
+                running_loss=running_loss,
+                running_examples=running_examples,
+                scores=scores,
+                pos_examples_in_batch=pos_examples_in_batch,
+            )
+
+            if self._eval_step_if_needed_and_end_training(
+                epoch=epoch, epoch_loss=epoch_loss
+            ):
+                break
 
         return epoch_loss, running_loss, running_examples
 
@@ -641,12 +509,12 @@ class RelGATTrainer:
         if improved:
             self.best_mrr = mrr
             if (
-                self.save_every_n_steps is not None
-                and self.global_step % self.save_every_n_steps == 0
+                self.storage.save_every_n_steps is not None
+                and self.global_step % self.storage.save_every_n_steps == 0
             ):
                 self.best_ckpt_dir = f"best_checkpoint_{self.global_step}"
                 self._save_checkpoint(subdir=self.best_ckpt_dir)
-                self._prune_checkpoints()
+                self.storage.prune_checkpoints()
 
                 self.log_adapter.log_metrics(
                     metrics={"checkpoint/step": self.global_step},
@@ -667,75 +535,115 @@ class RelGATTrainer:
             return True
         return False
 
-    #
-    # def _run_eval_and_maybe_early_stop(
-    #     self,
-    #     *,
-    #     epoch: int,
-    #     avg_train_loss: float,
-    #     step_based: bool,
-    # ) -> bool:
-    #     """
-    #     Run evaluation, log once, update best/early-stop. Returns True if training should stop.
-    #     """
-    #     # Use default eval_ks unless overridden here
-    #     ks = tuple(sorted(set(self.eval_ks if self.eval_ks else (1, 2, 3))))
-    #     mrr, hits, eval_loss = self.evaluate(ks=ks)
-    #     self._print_and_log_eval(
-    #         epoch=epoch,
-    #         avg_train_loss=avg_train_loss,
-    #         mrr=mrr,
-    #         hits=hits,
-    #         eval_loss=eval_loss,
-    #         step_based=step_based,
-    #     )
-    #     return self._on_eval_end(mrr)
+    def _run_eval_and_maybe_early_stop(
+        self,
+        *,
+        epoch: int,
+        avg_train_loss: float,
+        step_based: bool,
+    ) -> bool:
+        """
+        Run evaluation, log once, update best/early-stop. Returns True if training should stop.
+        """
+        # Use default eval_ks unless overridden here
+        ks = tuple(sorted(set(self.eval_ks if self.eval_ks else (1, 2, 3))))
+        mrr, hits, eval_loss = self.evaluate(ks=ks)
+        self._print_and_log_eval(
+            epoch=epoch,
+            avg_train_loss=avg_train_loss,
+            mrr=mrr,
+            hits=hits,
+            eval_loss=eval_loss,
+            step_based=step_based,
+        )
+        return self._on_eval_end(mrr)
 
-    #
-    # def _compute_transe_translation_error(
-    #     self,
-    #     *,
-    #     src_ids: torch.Tensor,
-    #     rel_ids: torch.Tensor,
-    #     dst_ids: torch.Tensor,
-    #     B: int,
-    # ) -> Optional[float]:
-    #     """
-    #     Średni błąd translacji dla TransE na pozytywach w batchu:
-    #         mean(|| src_emb + rel_emb - dst_emb ||_2)
-    #     Zwraca None, jeśli bieżący scorer nie jest TransE albo brak rel_emb.
-    #     """
-    #     # Logujemy tylko dla TransE
-    #     if getattr(self, "scorer_type", "").lower() != "transe":
-    #         return None
-    #
-    #     # Spodziewamy się, że model posiada scorer z rel_emb
-    #     scorer = getattr(self.model, "scorer", None)
-    #     rel_table = getattr(scorer, "rel_emb", None)
-    #     if scorer is None or rel_table is None:
-    #         return None
-    #
-    #     # Pozytywne przykłady to pierwsze B elementów
-    #     pos_src_ids = src_ids[:B].view(B)
-    #     pos_rel_ids = rel_ids[:B].view(B)
-    #     pos_dst_ids = dst_ids[:B].view(B)
-    #
-    #     # Pobranie embeddingów węzłów (z macierzy bazowej)
-    #     #   + upewniamy się, że tensory są na tym samym urządzeniu
-    #     node_mat = self.node_emb_matrix.to(self.device)
-    #     src_emb = node_mat[pos_src_ids]
-    #     dst_emb = node_mat[pos_dst_ids]
-    #
-    #     # Embedding relacji z tabeli scorer'a
-    #     rel_emb = rel_table(pos_rel_ids)
-    #
-    #     # Oblicz translację i jej normę L2
-    #     trans = src_emb + rel_emb - dst_emb
-    #
-    #     # Sanitizacja (w razie NaN/Inf)
-    #     trans = torch.nan_to_num(trans, nan=0.0, neginf=0.0, posinf=0.0)
-    #     err = torch.norm(trans, p=2, dim=-1).mean().item()
-    #     return float(err)
+    def _log_step_if_needed(
+        self,
+        epoch: int,
+        step_in_epoch: int,
+        step_start_time,
+        running_loss: float,
+        running_examples: int,
+        scores,
+        pos_examples_in_batch: int,
+    ):
+        if self.global_step % self.log_adapter.log_every_n_steps != 0:
+            return running_loss, running_examples
+
+        step_end = time.time()
+        step_time = step_end - step_start_time
+
+        grad_norm = -float("inf")
+        if self.log_grad_norm:
+            grad_norm = compute_total_grad_norm(self.model)
+
+        avg_running_loss = running_loss / max(1, running_examples)
+        current_lr = (
+            self.training_scheduler.scheduler.get_last_lr()[0]
+            if self.training_scheduler.scheduler is not None
+            else self.optimizer.param_groups[0]["lr"]
+        )
+
+        print(
+            f"\nGlobal step {self.global_step} "
+            f"grad_norm {grad_norm:.8f} "
+            f"loss_step: {avg_running_loss:.8f} "
+            f"lr: {current_lr:.8f} "
+            f"step_time {step_time}"
+        )
+
+        metrics = {
+            "epoch": epoch,
+            "train/loss_step": avg_running_loss,
+            "train/step_in_epoch": step_in_epoch,
+            "train/grad_norm": grad_norm,
+            "train/lr": current_lr,
+            "train/step_time": step_time,
+            "train/pos_score_mean": (
+                (scores[:pos_examples_in_batch].detach().clamp(-20.0, 20.0))
+                .mean()
+                .item()
+                if pos_examples_in_batch > 0
+                else 0.0
+            ),
+            "train/neg_score_mean": (
+                (
+                    scores[pos_examples_in_batch:]
+                    .view(pos_examples_in_batch, self.dataset.num_neg)
+                    .detach()
+                    .clamp(-20.0, 20.0)
+                )
+                .mean()
+                .item()
+                if (scores.numel() - pos_examples_in_batch) > 0
+                else 0.0
+            ),
+        }
+
+        self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
+
+        return 0.0, 1
+
+    def _eval_step_if_needed_and_end_training(self, epoch: int, epoch_loss: float):
+        if (
+            self.eval_every_n_steps is None
+            or self.global_step % self.eval_every_n_steps != 0
+        ):
+            return False
+
+        avg_train_loss = epoch_loss / len(self.dataset.train_dataset)
+        should_stop = self._run_eval_and_maybe_early_stop(
+            epoch=epoch,
+            avg_train_loss=avg_train_loss,
+            step_based=True,
+        )
+        if should_stop:
+            return True
+
+        # Change model to `train` mode
+        self.model.train()
+        return False
 
     def _log_metrics_on_begin(self):
         self.log_adapter.log_metrics(
