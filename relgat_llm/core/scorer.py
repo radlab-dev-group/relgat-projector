@@ -39,7 +39,7 @@ class DistMultScorer(nn.Module):
     torch.Size([32])
     """
 
-    def __init__(self, num_rel: int, rel_dim: int = 200):
+    def __init__(self, num_rel: int, rel_dim: int):
         """
         Initialize the DistMult scorer.
 
@@ -120,7 +120,7 @@ class TransEScorer(nn.Module):
     torch.Size([32])
     """
 
-    def __init__(self, num_rel: int, rel_dim: int = 200):
+    def __init__(self, num_rel: int, rel_dim: int):
         """
         Initialize the TransE scorer.
 
@@ -159,6 +159,8 @@ class TransEScorer(nn.Module):
         """
         # [B, D] shape
         rel_emb = self.rel_emb(rel_ids)
+
+        print(rel_emb[0].shape)
 
         # L2 distance
         distance = torch.norm(src_emb + rel_emb - dst_emb, p=2, dim=-1)
