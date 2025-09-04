@@ -55,7 +55,7 @@ class RelGATStorage:
                 f.write(json.dumps(json_data, indent=2, ensure_ascii=False))
         return str(out_path)
 
-    def _prune_checkpoints(self) -> None:
+    def prune_checkpoints(self) -> None:
         """
         Keeps a maximum of max_checkpoints most recent (or best) checkpoints.
         The oldest ones are deleted from the disc.

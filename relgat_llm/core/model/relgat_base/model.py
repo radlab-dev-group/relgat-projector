@@ -92,24 +92,14 @@ class RelGATModel(nn.Module):
                 self.node_emb_fixed, self.edge_index, self.edge_type
             )  # [N, D']
         else:
-            # x = self.node_emb_fixed
-            # for li, gat in enumerate(self.gat_layers):
-            #     x = gat(x, self.edge_index, self.edge_type)  # [N, D']
-            #     if li < len(self.gat_layers) - 1:
-            #         x = self.act(x)
-            raise Exception("Trzeba sprawdzić!")
+            x = self.node_emb_fixed
+            for li, gat in enumerate(self.gat_layers):
+                x = gat(x, self.edge_index, self.edge_type)  # [N, D']
+                if li < len(self.gat_layers) - 1:
+                    x = self.act(x)
 
         src_vec = x[src_ids]  # [B, D']
         dst_vec = x[dst_ids]  # [B, D']
-
-        # print("Source vectors")
-        # print(src_vec)
-        # print("Destination vectors")
-        # print(dst_vec)
-
-        # # print(x)
-        # print("node_emb_fixed=", self.node_emb_fixed.shape)
-        # print("x.shape=", x.shape)
 
         scores = self.scorer(src_vec, rel_ids, dst_vec)  # [B]
         return scores
