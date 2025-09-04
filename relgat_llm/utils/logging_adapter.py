@@ -19,7 +19,14 @@ class LoggerAdapter:
     ):
         self.run_name = run_name
         self.wandb_config = wandb_config
-        self.log_every_n_steps = log_every_n_steps
+
+        self.log_every_n_steps = run_config.get(
+            "log_every_n_steps", log_every_n_steps
+        )
+        if self.log_every_n_steps is None or int(self.log_every_n_steps) < 0:
+            self.log_every_n_steps = 1
+        else:
+            self.log_every_n_steps = int(self.log_every_n_steps)
 
         self.architecture_name = architecture_name
         self.run_config = run_config
