@@ -1,4 +1,4 @@
-# RekGAT Projector with RelGAT trainer
+# RelGAT Projector and RelGAT trainer with frozen embeddings
 This repository provides a hybrid Relational-GAT model with a projection head back to the input embedding space, 
 enabling relation-specific operators (TransE/DistMult) to be applied consistently inside and outside the graph. 
 The model supports inductive embedding imputation for nodes without vectors and relation-driven query expansion 
