@@ -83,6 +83,16 @@ class DistMultScorer(nn.Module):
         score = (src_emb * rel_emb * dst_emb).sum(dim=-1)
         return score
 
+    def transform(
+        self, src_emb: torch.Tensor, rel_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Apply relation-specific transformation in the DistMult parameterization:
+        x' = x ⊙ r
+        """
+        rel_emb = self.rel_emb(rel_ids)  # [B, D]
+        return src_emb * rel_emb
+
 
 class TransEScorer(nn.Module):
     """
@@ -165,3 +175,13 @@ class TransEScorer(nn.Module):
 
         # we return the *negative* distance so that a higher score = better
         return -distance
+
+    def transform(
+        self, src_emb: torch.Tensor, rel_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Apply relation-specific transformation in the TransE parameterization:
+        x' = x + r
+        """
+        rel_emb = self.rel_emb(rel_ids)  # [B, D]
+        return src_emb + rel_emb

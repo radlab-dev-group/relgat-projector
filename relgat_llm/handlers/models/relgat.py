@@ -68,6 +68,7 @@ class RelGATMainTrainerHandler:
             "dropout_rel_attention": args.dropout_rel_attention,
             "architecture_name": args.architecture,
             "base_model_name": "relgat",
+            "project_to_input_size": args.project_to_input_size,
             # Larning rate management
             "lr": args.lr,
             "lr_scheduler": args.lr_scheduler,
@@ -119,6 +120,7 @@ class RelGATMainTrainerHandler:
             dropout=run_cfg["dropout"],
             rel_attn_dropout=run_cfg["dropout_rel_attention"],
             architecture_name=run_cfg["architecture_name"],
+            project_to_input_size=run_cfg["project_to_input_size"],
             # Storage
             out_dir=run_cfg["out_dir"],
             max_checkpoints=run_cfg["max_checkpoints"],

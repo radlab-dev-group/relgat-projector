@@ -55,6 +55,7 @@ class RelGATTrainer:
         rel_attn_dropout: float = 0.0,
         architecture_name: Optional[str] = None,
         base_model_name: Optional[str] = None,
+        project_to_input_size: bool = True,
         # Storage
         max_checkpoints: int = 5,
         out_dir: Optional[str] = None,
@@ -92,6 +93,7 @@ class RelGATTrainer:
             architecture_name=architecture_name,
             base_model_name=base_model_name,
             run_config=run_config,
+            project_to_input_size=project_to_input_size,
         )
 
         # Training scheduler (total steps, warmup steps, etc.)
@@ -210,6 +212,7 @@ class RelGATTrainer:
             dropout=self.architecture.dropout,
             relation_attn_dropout=self.architecture.dropout_rel_attention,
             gat_num_layers=self.architecture.gat_num_layers,
+            project_to_input_size=self.architecture.project_to_input_size,
         ).to(self.device)
 
         # Optimizer

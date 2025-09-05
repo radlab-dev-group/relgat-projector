@@ -73,6 +73,10 @@ fi
 # Scorer, one of: [distmult, transe]
 SCORER="distmult"
 
+# Project to input size embeddings (if option is given).
+# If not set, then frozen-GAT will be learned
+# PROJECT_TO_INPUT_SIZE=1
+
 # Dropout used while training (on embedder dimension)
 DROPOUT=0.3
 
@@ -159,4 +163,5 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-base-train \
   ${GRADIENT_CLIPPING:+--grad-clip-norm="${GRADIENT_CLIPPING}"} \
   ${USE_AMP:+--use-amp="${USE_AMP}"} \
   ${DISABLE_EDGE_TYPES:+--disable-edge-type-mask="${DISABLE_EDGE_TYPES}"} \
-  ${USE_SELF_ADV_NEG:+--use-self-adv-neg}
+  ${USE_SELF_ADV_NEG:+--use-self-adv-neg} \
+  ${PROJECT_TO_INPUT_SIZE:+--project-to-input-size}

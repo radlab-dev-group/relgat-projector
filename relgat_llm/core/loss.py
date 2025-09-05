@@ -70,3 +70,89 @@ class RelGATLoss:
         neg_loss = -(weights * F.logsigmoid(-neg_score)).sum(dim=1).mean()
 
         return pos_loss + neg_loss
+
+
+class MultiObjectiveRelLoss:
+    """
+    Kombinuje klasyczny ranking loss z rekonstrukcyjnymi stratami A->r->B:
+    - ranking_loss: margin/self-adversarial na score'ach
+    - cosine_recon: 1 - cosine(f_r(A), B)
+    - mse_recon: MSE(f_r(A), B)
+    Wagi poszczególnych komponentów konfigurowalne.
+    """
+
+    def __init__(
+        self,
+        *,
+        relgat_loss_type: str,
+        run_config: Dict[str, Any],
+        margin: float = 1.0,
+        clamp_limit: int = 20,
+        self_adv_alpha: Optional[float] = None,
+        relgat_weight: float = 1.0,
+        cosine_weight: float = 1.0,
+        mse_weight: float = 0.0,
+    ):
+        self.ranking_weight = float(relgat_weight)
+        self.cosine_weight = float(cosine_weight)
+        self.mse_weight = float(mse_weight)
+
+        self.relgat_loss = RelGATLoss(
+            loss_type=relgat_loss_type,
+            self_adv_alpha=self_adv_alpha,
+            margin=margin,
+            clamp_limit=clamp_limit,
+            run_config=run_config,
+        )
+
+    @staticmethod
+    def cosine_reconstruction_loss(
+        pred: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        1 - cosine_similarity averaged over batch.
+        """
+        pred_n = F.normalize(pred, p=2, dim=-1)
+        tgt_n = F.normalize(target, p=2, dim=-1)
+        cos = (pred_n * tgt_n).sum(dim=-1)  # [B]
+        return (1.0 - cos).mean()
+
+    @staticmethod
+    def mse_reconstruction_loss(
+        pred: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        return F.mse_loss(pred, target)
+
+    def relgat_ranking_loss(
+        self, pos_score: torch.Tensor, neg_score: torch.Tensor
+    ) -> torch.Tensor:
+        return self.relgat_loss.prepare_scores_and_compute_loss(
+            pos_score=pos_score, neg_score=neg_score
+        )
+
+    def __call__(
+        self,
+        *,
+        pos_score: torch.Tensor,
+        neg_score: torch.Tensor,
+        transformed_src: torch.Tensor,  # f_r(A)
+        dst_vec: torch.Tensor,  # B
+    ) -> torch.Tensor:
+        parts = []
+        if self.ranking_weight != 0.0:
+            parts.append(
+                self.ranking_weight * self.relgat_ranking_loss(pos_score, neg_score)
+            )
+        if self.cosine_weight != 0.0:
+            parts.append(
+                self.cosine_weight
+                * self.cosine_reconstruction_loss(transformed_src, dst_vec)
+            )
+        if self.mse_weight != 0.0:
+            parts.append(
+                self.mse_weight
+                * self.mse_reconstruction_loss(transformed_src, dst_vec)
+            )
+        if not parts:
+            raise ValueError("At least one loss weight must be non-zero.")
+        return torch.stack(parts).sum()

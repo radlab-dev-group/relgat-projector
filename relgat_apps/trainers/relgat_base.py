@@ -128,6 +128,13 @@ def get_args() -> argparse.Namespace:
         f"(default: {ConstantsRelGATTrainer.Default.GAT_HEADS})",
     )
     parser.add_argument(
+        "--project-to-input-size",
+        dest="project_to_input_size",
+        action="store_true",
+        help="Project to input size embeddings (if option is given). "
+        "If not set, then frozen-GAT will be learned",
+    )
+    parser.add_argument(
         "--dropout",
         dest="dropout",
         type=float,

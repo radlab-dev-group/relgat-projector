@@ -12,6 +12,7 @@ class ModelArchitectureConstructor:
         scorer_type: str,
         architecture_name: Optional[str],
         base_model_name: Optional[str],
+        project_to_input_size: bool,
         run_config: Dict[str, Any],
     ):
         self.gat_out_dim = int(run_config.get("gat_out_dim", gat_out_dim))
@@ -24,6 +25,10 @@ class ModelArchitectureConstructor:
         self.scorer_type = str(run_config.get("scorer_type", scorer_type))
         self.architecture_name = architecture_name
         self.base_model_name = base_model_name
+
+        self.project_to_input_size = run_config.get("project_to_input")
+        if self.project_to_input_size is None:
+            self.project_to_input_size = project_to_input_size
 
         if self.architecture_name is not None:
             self.__check_architecture()
