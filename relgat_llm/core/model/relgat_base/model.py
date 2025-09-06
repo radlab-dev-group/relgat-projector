@@ -3,6 +3,8 @@ import json
 import torch
 import torch.nn as nn
 
+from typing import Tuple, Optional
+
 from relgat_llm.core.scorer import DistMultScorer, TransEScorer
 from relgat_llm.core.model.relgat_base.layer import RelGATLayer
 
@@ -20,7 +22,7 @@ class RelGATModel(nn.Module):
         dropout: float = 0.2,
         relation_attn_dropout: float = 0.0,
         gat_num_layers: int = 1,
-        project_to_input_size: bool = True,  # project GAT output back to input dim
+        project_to_input_size: bool = False,  # project GAT output back to input dim
     ):
         super().__init__()
         self.register_buffer("node_emb_fixed", node_emb)  # not a Parameter
@@ -28,6 +30,7 @@ class RelGATModel(nn.Module):
         self.edge_index = edge_index
         self.edge_type = edge_type
         self.gat_num_layers = gat_num_layers
+        self.project_to_input_size = project_to_input_size
 
         if gat_num_layers == 1:
             self.gat_layer = RelGATLayer(
@@ -62,7 +65,7 @@ class RelGATModel(nn.Module):
 
         # Optional projection back to the input-embedding dimension
         _scorer_gat_dim = gat_out_dim * gat_heads
-        if self.project_to_input:
+        if self.project_to_input_size:
             self.proj_out = nn.Linear(_scorer_gat_dim, node_emb.size(1), bias=False)
             _scorer_gat_dim = node_emb.size(1)
         else:
@@ -77,11 +80,16 @@ class RelGATModel(nn.Module):
             raise ValueError(f"Unknown scorer_type: {scorer_type}")
 
     def forward(
-        self, src_ids: torch.Tensor, rel_ids: torch.Tensor, dst_ids: torch.Tensor
-    ) -> torch.Tensor:
+        self,
+        src_ids: torch.Tensor,
+        rel_ids: torch.Tensor,
+        dst_ids: torch.Tensor,
+        transform_to_input_if_possible: bool = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        Compute scores for a batch of triples.
-         src_ids, rel_ids, dst_ids : [B]  (int64)
+        Compute scores for a batch of triples. And optionally transform the
+        GAT output dimension to input embedding-space.
+        src_ids, rel_ids, dst_ids : [B]  (int64)
 
         Parameters
         ----------
@@ -91,28 +99,28 @@ class RelGATModel(nn.Module):
             Relation indices.
         dst_ids : torch.LongTensor [B]
             Destination node indices.
+        transform_to_input_if_possible: bool:
+            Whether to transform the GAT output dimension
+            to input embedding-space if projection is available.
 
         Returns
         -------
-        torch.Tensor [B]
-            Compatibility scores (higher ⇒ more plausible).
+        Tuple[
+            torch.Tensor [B],
+            Optional[torch.Tensor] [B, D_sc],
+            torch.Tensor [B, D']
+        ]
+        Compatibility scores (higher ⇒ more plausible), optional projection
+        to embedding space and destination vector
+
+
         """
-        x = self._compute_node_repr()
+        x = self.single_gat_step()
         src_vec = x[src_ids]  # [B, D']
         dst_vec = x[dst_ids]  # [B, D']
-        scores = self.scorer(src_vec, rel_ids, dst_vec)  # [B]
-        return scores
-
-    def forward_with_transform(
-        self, src_ids: torch.Tensor, rel_ids: torch.Tensor, dst_ids: torch.Tensor
-    ):
-        """
-        Convenience: returns (scores, transformed_src, dst_vec)
-        """
-        x = self._compute_node_repr()  # [N, D_sc]
-        src_vec = x[src_ids]  # [B, D_sc]
-        dst_vec = x[dst_ids]  # [B, D_sc]
-        transformed = self.scorer.transform(src_vec, rel_ids)  # [B, D_sc]
+        transformed = None
+        if self.project_to_input_size and transform_to_input_if_possible:
+            transformed = self.scorer.transform(src_vec, rel_ids)  # [B, D_sc]
         scores = self.scorer(src_vec, rel_ids, dst_vec)  # [B]
         return scores, transformed, dst_vec
 
@@ -122,7 +130,7 @@ class RelGATModel(nn.Module):
         Return full matrix of node representations used by the scorer.
         Useful for exporting or offline usage.
         """
-        return self._compute_node_repr()
+        return self.single_gat_step()
 
     @torch.no_grad()
     def transform(
@@ -136,7 +144,7 @@ class RelGATModel(nn.Module):
         Returns:
           - transformed vectors: [B, D_sc]
         """
-        x = self._compute_node_repr()
+        x = self.single_gat_step()
         src_vec = x[src_ids]
         # support broadcasting single rel_id over batch
         return self.transform_from_vectors(src_vectors=src_vec, rel_ids=rel_ids)
@@ -238,7 +246,7 @@ class RelGATModel(nn.Module):
         model.eval()
         return model
 
-    def _compute_node_repr(self) -> torch.Tensor:
+    def single_gat_step(self) -> torch.Tensor:
         """
         Compute node representations (optionally projected to input dim).
         """
@@ -252,6 +260,6 @@ class RelGATModel(nn.Module):
                 x = gat(x, self.edge_index, self.edge_type)  # [N, D_gat]
                 if self.act is not None and li < len(self.gat_layers) - 1:
                     x = self.act(x)
-        if self.proj_out is not None:
+        if self.project_to_input_size:
             x = self.proj_out(x)  # [N, D_in]
         return x

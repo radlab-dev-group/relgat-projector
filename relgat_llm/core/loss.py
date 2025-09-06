@@ -84,26 +84,17 @@ class MultiObjectiveRelLoss:
     def __init__(
         self,
         *,
-        relgat_loss_type: str,
+        relgat_loss,
         run_config: Dict[str, Any],
-        margin: float = 1.0,
-        clamp_limit: int = 20,
-        self_adv_alpha: Optional[float] = None,
-        relgat_weight: float = 1.0,
         cosine_weight: float = 1.0,
         mse_weight: float = 0.0,
+        relgat_weight: float = 1.0,
     ):
-        self.ranking_weight = float(relgat_weight)
-        self.cosine_weight = float(cosine_weight)
-        self.mse_weight = float(mse_weight)
+        self.ranking_weight = run_config.get("relgat_weight", relgat_weight)
+        self.cosine_weight = run_config.get("cosine_weight", cosine_weight)
+        self.mse_weight = run_config.get("mse_weight", mse_weight)
 
-        self.relgat_loss = RelGATLoss(
-            loss_type=relgat_loss_type,
-            self_adv_alpha=self_adv_alpha,
-            margin=margin,
-            clamp_limit=clamp_limit,
-            run_config=run_config,
-        )
+        self.relgat_loss = relgat_loss
 
     @staticmethod
     def cosine_reconstruction_loss(

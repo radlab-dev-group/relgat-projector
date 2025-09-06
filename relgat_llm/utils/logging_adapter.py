@@ -1,3 +1,5 @@
+import json
+
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -16,10 +18,14 @@ class LoggerAdapter:
         run_config: Optional[Dict[str, Any]] = None,
         wandb_config: Optional[Any] = None,
         log_every_n_steps: int = 100,
+        log_to_wandb: bool = False,
+        log_to_console: bool = True,
     ):
         self.run_name = run_name
-        self.wandb_config = wandb_config
+        self.log_to_wandb = log_to_wandb
+        self.log_to_console = log_to_console
 
+        self.wandb_config = wandb_config
         self.log_every_n_steps = run_config.get(
             "log_every_n_steps", log_every_n_steps
         )
@@ -54,17 +60,24 @@ class LoggerAdapter:
         return self.run_name
 
     def init_wandb_if_needed(self, training_args=None):
-        WanDBHandler.init_wandb(
-            wandb_config=self.wandb_config,
-            run_config=self.run_config,
-            training_args=training_args,
-            run_name=self.run_name,
-        )
+        if self.log_to_wandb:
+            WanDBHandler.init_wandb(
+                wandb_config=self.wandb_config,
+                run_config=self.run_config,
+                training_args=training_args,
+                run_name=self.run_name,
+            )
 
-    @staticmethod
-    def log_metrics(metrics, step: int):
-        WanDBHandler.log_metrics(metrics=metrics, step=step)
+    def log_metrics(self, metrics, step: int):
+        if self.log_to_console:
 
-    @staticmethod
-    def finish_wand_if_needed():
-        WanDBHandler.finish_wand()
+            print(f"Step {step}:")
+            if type(metrics) in [dict, list]:
+                metrics = json.dumps(metrics, indent=2, ensure_ascii=False)
+
+        if self.log_to_wandb:
+            WanDBHandler.log_metrics(metrics=metrics, step=step)
+
+    def finish_wand_if_needed(self):
+        if self.log_to_wandb:
+            WanDBHandler.finish_wand()

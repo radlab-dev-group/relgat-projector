@@ -9,8 +9,8 @@ long_description = (
 
 setup(
     name="relgat-trainer",
-    version="0.1.0",
-    description="A lightweight trainer for Relational Graph Attention Networks (RelGAT).",
+    version="0.2.0",
+    description="A lightweight trainer for frozen-RelGAT with projection layer.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",
