@@ -133,7 +133,7 @@ RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
 # --------------------  APPLICATION CALL
 # =============================================================================
 
-CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-base-train \
+CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-projector-train \
   --architecture="${ARCHITECTURE}" \
   --lr="${LEARNING_RATE}" \
   --lr-decay="${LR_DECAY}" \

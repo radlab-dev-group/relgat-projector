@@ -4,7 +4,7 @@ import random
 from torch.utils.data import DataLoader
 from typing import Tuple, List, Any, Dict
 
-from relgat_llm.dataset.edge import EdgeDataset
+from relgat_projector.dataset.edge import EdgeDataset
 
 
 class RelGATDataset:

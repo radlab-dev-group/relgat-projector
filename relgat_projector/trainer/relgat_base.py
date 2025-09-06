@@ -4,21 +4,21 @@ import torch
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
 
-from relgat_llm.utils.random_seed import RandomSeed
-from relgat_llm.utils.logging_adapter import LoggerAdapter
+from relgat_projector.utils.random_seed import RandomSeed
+from relgat_projector.utils.logging_adapter import LoggerAdapter
 
-from relgat_llm.base.constants import ConstantsRelGATTrainer
-from relgat_llm.dataset.relgat_dataset import RelGATDataset
-from relgat_llm.handlers.storage import RelGATStorage
+from relgat_projector.base.constants import ConstantsRelGATTrainer
+from relgat_projector.dataset.relgat_dataset import RelGATDataset
+from relgat_projector.handlers.storage import RelGATStorage
 
-from relgat_llm.core.eval import RelgatEval
-from relgat_llm.core.loss import RelGATLoss, MultiObjectiveRelLoss
-from relgat_llm.core.lr import TrainingScheduler
-from relgat_llm.core.model.relgat_base.model import RelGATModel
-from relgat_llm.core.architecture.constructor import ModelArchitectureConstructor
+from relgat_projector.core.eval import RelgatEval
+from relgat_projector.core.loss import RelGATLoss, MultiObjectiveRelLoss
+from relgat_projector.core.lr import TrainingScheduler
+from relgat_projector.core.model.relgat_base.model import RelGATModel
+from relgat_projector.core.architecture.constructor import ModelArchitectureConstructor
 
-from relgat_llm.trainer.components.grad import compute_total_grad_norm
-from relgat_llm.trainer.components.relgat_batching import concat_pos_negs_to_tensors
+from relgat_projector.trainer.components.grad import compute_total_grad_norm
+from relgat_projector.trainer.components.relgat_batching import concat_pos_negs_to_tensors
 
 
 class RelGATTrainer:
