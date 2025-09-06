@@ -70,7 +70,7 @@ class LoggerAdapter:
 
     def log_metrics(self, metrics, step: int):
         if self.log_to_console:
-            print(f"Step {step}:")
+            print(f"[{self.run_name}] Step {step}:")
             if type(metrics) in [dict, list]:
                 metrics = json.dumps(metrics, indent=2, ensure_ascii=False)
 
