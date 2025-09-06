@@ -15,10 +15,14 @@ from relgat_projector.core.eval import RelgatEval
 from relgat_projector.core.loss import RelGATLoss, MultiObjectiveRelLoss
 from relgat_projector.core.lr import TrainingScheduler
 from relgat_projector.core.model.relgat_base.model import RelGATModel
-from relgat_projector.core.architecture.constructor import ModelArchitectureConstructor
+from relgat_projector.core.architecture.constructor import (
+    ModelArchitectureConstructor,
+)
 
 from relgat_projector.trainer.components.grad import compute_total_grad_norm
-from relgat_projector.trainer.components.relgat_batching import concat_pos_negs_to_tensors
+from relgat_projector.trainer.components.relgat_batching import (
+    concat_pos_negs_to_tensors,
+)
 
 
 class RelGATTrainer:

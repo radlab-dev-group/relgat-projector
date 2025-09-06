@@ -3,7 +3,7 @@ import json
 import torch
 import torch.nn as nn
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict, Any
 
 from relgat_projector.core.scorer import DistMultScorer, TransEScorer
 from relgat_projector.core.model.relgat_base.layer import RelGATLayer
@@ -176,21 +176,25 @@ class RelGATModel(nn.Module):
         """
         return dict(self._config)
 
-    def save_pretrained(self, output_dir: str) -> None:
+    def save_pretrained(
+        self, output_dir: str, add_files: Optional[List[Tuple[str, Dict[str, Any]]]]
+    ) -> None:
         """
         Zapisuje wagi modelu i konfigurację do folderu:
          - {output_dir}/config.json
          - {output_dir}/pytorch_model.bin
         """
+        add_files = [] if add_files is None else add_files
         os.makedirs(output_dir, exist_ok=True)
-        cfg_path = os.path.join(output_dir, "config.json")
+        # Config files
+        add_files.append(("config.json", self.get_config()))
+        for _d_file_name, _f_content in add_files:
+            _f_path = os.path.join(output_dir, _d_file_name)
+            with open(_f_path, "w", encoding="utf-8") as f:
+                json.dump(_f_content, f, ensure_ascii=False, indent=2)
+
+        # Model's weights
         w_path = os.path.join(output_dir, "pytorch_model.bin")
-
-        # zapis konfiguracji
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(self.get_config(), f, ensure_ascii=False, indent=2)
-
-        # zapis wag
         torch.save(self.state_dict(), w_path)
 
     @staticmethod
