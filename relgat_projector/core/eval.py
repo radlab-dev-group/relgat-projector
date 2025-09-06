@@ -6,21 +6,6 @@ from typing import Tuple, Dict
 class RelgatEval:
     @staticmethod
     def compute_mrr_hits(
-        scores: torch.Tensor, true_idx: int = 0, ks: Tuple[int, ...] = (1, 3, 10)
-    ):
-        # Zabezpieczenie:
-        #   NaN/±inf traktujemy jako "bardzo słabe" wyniki,
-        #   by nie windowały MRR do 1.0
-        s = torch.nan_to_num(scores, nan=-1e9, neginf=-1e9, posinf=1e9)
-        if not torch.isfinite(s[true_idx]):
-            s[true_idx] = -1e9
-        rank = (s > s[true_idx]).sum().item() + 1
-        mrr = 1.0 / max(1, rank)
-        hits = {k: 1.0 if rank <= k else 0.0 for k in ks}
-        return mrr, hits
-
-    @staticmethod
-    def compute_batch_metrics_vectorized(
         *,
         pos_score: torch.Tensor,
         neg_score: torch.Tensor,
@@ -50,3 +35,20 @@ class RelgatEval:
         mrr = (1.0 / torch.clamp(ranks, min=1.0)).mean().item()
         hits = {k: (ranks <= float(k)).to(pos_s.dtype).mean().item() for k in ks}
         return mrr, hits
+
+    @staticmethod
+    def batch_cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
+        """
+        Zwraca średnią cosine similarity dla par (a_i, b_i).
+        """
+        a_n = torch.nn.functional.normalize(a, p=2, dim=-1)
+        b_n = torch.nn.functional.normalize(b, p=2, dim=-1)
+        cos = (a_n * b_n).sum(dim=-1)  # [B]
+        return cos.mean().item()
+
+    @staticmethod
+    def batch_mse(a: torch.Tensor, b: torch.Tensor) -> float:
+        """
+        Zwraca średni MSE dla par (a_i, b_i).
+        """
+        return torch.nn.functional.mse_loss(a, b).item()

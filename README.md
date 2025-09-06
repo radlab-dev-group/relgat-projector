@@ -42,12 +42,12 @@ pip install -e .
 
 Install directly from a Git repository (replace URL accordingly):
 ```bash
-pip install "git+[https://github.com/radlab-dev-group/relgat-llm.git#egg=relgat-llm](https://github.com/radlab-dev-group/relgat-llm.git#egg=relgat-llm)"
+pip install "git+[https://github.com/radlab-dev-group/relgat-projector.git#egg=relgat-projector](https://github.com/radlab-dev-group/relgat-projector.git#egg=relgat-projector)"
 ````
 
 After installation, a console entry point is available:
 ```bash
-relgat-base-train --help
+relgat-projector-train --help
 ```
 
 If you run into issues with torch-scatter (especially on GPU), install the 
@@ -87,7 +87,7 @@ plwordnet-milvus
 Train a model with your prepared files:
 
 ```bash
-relgat-base-train
+relgat-projector-train
     --nodes-embeddings-path /path/to/nodes_embeddings.pt
     --relations-mapping /path/to/relations_mapping.json
     --relations-triplets /path/to/relations_triplets.tsv
