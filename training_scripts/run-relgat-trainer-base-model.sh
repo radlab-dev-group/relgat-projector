@@ -135,7 +135,7 @@ DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset
 # Available datasets:
 #  - FULL: dataset_syn_two_way
 #  - SAMPLE: dataset_syn_two_way__limit1k
-DATASET_DIR="${DATASET_ROOT}/dataset_syn_two_way"
+DATASET_DIR="${DATASET_ROOT}/dataset_syn_two_way__limit1k"
 LU_EMBEDDING="${DATASET_DIR}/lexical_units_embedding.pickle"
 RELS_MAPPING="${DATASET_DIR}/relation_to_idx.json"
 RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"

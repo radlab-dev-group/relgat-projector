@@ -147,6 +147,5 @@ class RelGATMainTrainerHandler:
             relgat_weight=run_cfg["relgat_weight"],
             cosine_weight=run_cfg["cosine_weight"],
             mse_weight=run_cfg["mse_weight"],
-            projection_to_base_size=run_cfg["projection_to_base_size"],
         )
         return trainer
