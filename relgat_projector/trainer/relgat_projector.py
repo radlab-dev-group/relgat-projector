@@ -298,11 +298,11 @@ class RelGATTrainer:
                 }
 
                 if cosine is not None:
-                    total_cos += cosine
+                    total_cos += cosine * pos_examples_in_batch
                     metrics["eval/cosine_mean_batch"] = cosine
 
                 if mse is not None:
-                    total_mse += mse
+                    total_mse += mse * pos_examples_in_batch
                     metrics["eval/mse_mean_batch"] = mse
 
                 self.log_adapter.log_metrics(
