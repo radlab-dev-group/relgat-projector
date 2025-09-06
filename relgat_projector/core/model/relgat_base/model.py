@@ -228,7 +228,8 @@ class RelGATModel(nn.Module):
         # Walidacja wymiarów
         if int(cfg.get("input_dim")) != int(node_emb.size(1)):
             raise ValueError(
-                f"Input dim mismatch: config={cfg.get('input_dim')} vs node_emb={node_emb.size(1)}"
+                f"Input dim mismatch: "
+                f"config={cfg.get('input_dim')} vs node_emb={node_emb.size(1)}"
             )
 
         model = RelGATModel(
