@@ -73,6 +73,17 @@ fi
 # Scorer, one of: [distmult, transe]
 SCORER="distmult"
 
+# Enable value above, to use the projection to base embedding size.
+# Relation embeddings will be projected to the input embedding size
+# (to disable projection, lets comment the next line)
+PROJECTION_TO_BASE_EMB_SIZE=True
+
+# When using projection, multi objective loss function will be used.
+# ... then following weights will be used:
+RELGAT_WEIGHT=1.0
+COSINE_WEIGHT=1.0
+MSE_WEIGHT=0.0
+
 # Project to input size embeddings (if option is given).
 # If not set, then frozen-GAT will be learned
 # PROJECT_TO_INPUT_SIZE=1
@@ -116,7 +127,8 @@ USE_SELF_ADV_NEG=True
 # =============================================================================
 
 # Output directory to store the model and checkpoints during training
-OUT_MODEL_DIR="relgat-models/relgat-${ARCHITECTURE}_$(date +%Y%m%d_%H%M%S)"
+START_DATE_STR=$(date +%Y%m%d_%H%M%S)
+OUT_MODEL_DIR="relgat-models/relgat-${ARCHITECTURE}_${START_DATE_STR}"
 
 # This dataset have to prepared using the base embedder (the same as the used in application)
 DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset-identifiers/wtcsnxj9"
@@ -158,10 +170,21 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-projector-train \
   --save-dir="${OUT_MODEL_DIR}" \
   --save-every-n-steps="${SAVE_N_STEPS}" \
   --max-checkpoints="${MAX_CHECKPOINTS}" \
+  --relgat-weight="${RELGAT_WEIGHT}" \
+  --cosine-weight="${COSINE_WEIGHT}" \
+  --mse-weight="${MSE_WEIGHT}" \
   ${EVAL_N_STEPS:+--eval-every-n-steps="${EVAL_N_STEPS}"} \
   ${WARMUP_STEPS:+--warmup-steps="${WARMUP_STEPS}"} \
   ${GRADIENT_CLIPPING:+--grad-clip-norm="${GRADIENT_CLIPPING}"} \
   ${USE_AMP:+--use-amp="${USE_AMP}"} \
   ${DISABLE_EDGE_TYPES:+--disable-edge-type-mask="${DISABLE_EDGE_TYPES}"} \
   ${USE_SELF_ADV_NEG:+--use-self-adv-neg} \
-  ${PROJECT_TO_INPUT_SIZE:+--project-to-input-size}
+  ${PROJECTION_TO_BASE_EMB_SIZE:+--project-to-input-size}
+
+
+END_DATE_STR=$(date +%Y%m%d_%H%M%S)
+echo "====================================================================="
+echo "[POST TRAINING INFO] Training stared on  : ${START_DATE_STR}"
+echo "[POST TRAINING INFO] Training ended on   : ${END_DATE_STR}"
+echo "[POST TRAINING INFO] Checkpoints saved to: ${OUT_MODEL_DIR}"
+echo "====================================================================="

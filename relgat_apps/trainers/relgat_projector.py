@@ -289,6 +289,15 @@ def get_args() -> argparse.Namespace:
     # Optional margin argument
     parser.add_argument("--margin", type=float, default=1.0)
 
+    # Multi objective loss function
+    parser.add_argument(
+        "--relgat-weight", dest="relgat_weight", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--cosine-weight", dest="cosine_weight", type=float, default=1.0
+    )
+    parser.add_argument("--mse-weight", dest="mse_weight", type=float, default=0.0)
+
     return parser.parse_args()
 
 

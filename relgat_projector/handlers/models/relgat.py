@@ -90,6 +90,10 @@ class RelGATMainTrainerHandler:
             "weight_decay": args.weight_decay,
             "grad_clip_norm": args.grad_clip_norm,
             "eval_ks_ranks": [i for i in range(1, args.num_neg + 1)],
+            "relgat_weight": args.relgat_weight,
+            "cosine_weight": args.cosine_weight,
+            "mse_weight": args.mse_weight,
+            "projection_to_base_size": args.projection_to_base_size,
         }
 
         trainer = RelGATTrainer(
@@ -138,6 +142,11 @@ class RelGATMainTrainerHandler:
             disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
             use_self_adv_neg=run_cfg["use_self_adv_neg"],
             self_adv_alpha=run_cfg["self_adv_alpha"],
+            # Evaluation
             eval_ks_ranks=run_cfg["eval_ks_ranks"],
+            relgat_weight=run_cfg["relgat_weight"],
+            cosine_weight=run_cfg["cosine_weight"],
+            mse_weight=run_cfg["mse_weight"],
+            projection_to_base_size=run_cfg["projection_to_base_size"],
         )
         return trainer

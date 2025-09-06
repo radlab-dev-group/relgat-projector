@@ -79,6 +79,9 @@ class RelGATTrainer:
         # use_amp: bool = False,
         # evaluation options
         eval_ks_ranks: List[int, ...] = (1, 2, 3, 4, 5),
+        relgat_weight: float = 1.0,
+        cosine_weight: float = 1.0,
+        mse_weight: float = 0.0,
     ):
         # Experiments reproduction (seed)
         self.repr_training = RandomSeed(
@@ -155,13 +158,15 @@ class RelGATTrainer:
         )
 
         # Multi-objective: relgat + reconstruction
-        self.multi_loss = MultiObjectiveRelLoss(
-            relgat_loss=self.relgat_loss,
-            relgat_weight=float(run_config.get("relgat_weight", 1.0)),
-            cosine_weight=float(run_config.get("cosine_weight", 1.0)),
-            mse_weight=float(run_config.get("mse_weight", 0.0)),
-            run_config=run_config,
-        )
+        self.multi_loss = None
+        if project_to_input_size:
+            self.multi_loss = MultiObjectiveRelLoss(
+                relgat_loss=self.relgat_loss,
+                relgat_weight=relgat_weight,
+                cosine_weight=cosine_weight,
+                mse_weight=mse_weight,
+                run_config=run_config,
+            )
 
         # ====================================================================
         # Training environment
@@ -443,7 +448,7 @@ class RelGATTrainer:
         Optional[torch.Tensor],
     ]:
         cosine, mse = None, None
-        if self.multi_loss is None:
+        if self.architecture.project_to_input_size:
             scores, transformed, dst_vec = self._forward_model_scores(
                 src_ids,
                 rel_ids,
@@ -719,7 +724,7 @@ class RelGATTrainer:
             ),
         }
         # Multi loss
-        if self.multi_loss is not None:
+        if self.architecture.project_to_input_size:
             metrics["train/cosine"] = float(cosine)
             metrics["train/mse"] = float(mse)
 
