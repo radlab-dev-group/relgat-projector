@@ -93,7 +93,6 @@ class RelGATMainTrainerHandler:
             "relgat_weight": args.relgat_weight,
             "cosine_weight": args.cosine_weight,
             "mse_weight": args.mse_weight,
-            "projection_to_base_size": args.projection_to_base_size,
         }
 
         trainer = RelGATTrainer(

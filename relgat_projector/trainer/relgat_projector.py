@@ -78,7 +78,7 @@ class RelGATTrainer:
         self_adv_alpha: float = 1.0,
         # use_amp: bool = False,
         # evaluation options
-        eval_ks_ranks: Optional[List[int, ...]] = None,
+        eval_ks_ranks: Optional[List] = None,
         relgat_weight: float = 1.0,
         cosine_weight: float = 1.0,
         mse_weight: float = 0.0,
@@ -430,6 +430,7 @@ class RelGATTrainer:
                 pos_score=pos_score,
                 neg_score=neg_score,
                 pos_examples_in_batch=pos_examples_in_batch,
+                cosine=cosine,
                 mse=mse,
             )
 
