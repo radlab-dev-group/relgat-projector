@@ -8,13 +8,13 @@ long_description = (
 )
 
 setup(
-    name="relgat-trainer",
+    name="relgat-projector-trainer",
     version="0.2.0",
     description="A lightweight trainer for frozen-RelGAT with projection layer.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",
-    url="https://github.com/radlab-dev-group/relgat-llm",
+    url="https://github.com/radlab-dev-group/relgat-projector",
     author="RadLab team",
     author_email="pawel@radlab.dev",
     keywords=[
