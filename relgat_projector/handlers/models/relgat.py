@@ -89,7 +89,7 @@ class RelGATMainTrainerHandler:
             "self_adv_alpha": args.self_adv_alpha,
             "weight_decay": args.weight_decay,
             "grad_clip_norm": args.grad_clip_norm,
-            "eval_vectorized": True,
+            "eval_ks_ranks": [i for i in range(1, args.num_neg + 1)],
         }
 
         trainer = RelGATTrainer(
@@ -138,7 +138,6 @@ class RelGATMainTrainerHandler:
             disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
             use_self_adv_neg=run_cfg["use_self_adv_neg"],
             self_adv_alpha=run_cfg["self_adv_alpha"],
-            eval_vectorized=run_cfg["eval_vectorized"],
-            eval_ks=(1, 2, 3, 4, 5),
+            eval_ks_ranks=run_cfg["eval_ks_ranks"],
         )
         return trainer
