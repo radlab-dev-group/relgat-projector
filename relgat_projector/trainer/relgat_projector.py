@@ -159,9 +159,6 @@ class RelGATTrainer:
         )
 
         # ====================================================================
-        # debug_mode
-        self.debug_mode = True
-
         # Training environment
         self.run_config = run_config
         self.device = str(run_config.get("device", device))
@@ -385,6 +382,7 @@ class RelGATTrainer:
             src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
                 pos, negs, device=self.device
             )
+
             pos_score, neg_score, loss, mse, cosine = self._calculate_loss(
                 src_ids=src_ids,
                 rel_ids=rel_ids,
@@ -392,12 +390,7 @@ class RelGATTrainer:
                 pos_examples_in_batch=pos_examples_in_batch,
                 phase="train",
             )
-
-            if not torch.isfinite(loss):
-                self.log_adapter.log_metrics(
-                    {"train/nonfinite_loss_steps": 1}, step=self.global_step
-                )
-                print("Non‑finite loss encountered. Skipping step.")
+            if self._log_non_finite_loss_if_needed(loss=loss):
                 continue
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -413,6 +406,7 @@ class RelGATTrainer:
 
             # TransE stabilization of scale:
             #   -> normalization of relation vectors after each step.
+            # TODO: Normalization have to be done within scorer
             if getattr(self, "scorer_type", "").lower() == "transe":
                 with torch.no_grad():
                     w = self.model.scorer.rel_emb.weight
@@ -528,7 +522,7 @@ class RelGATTrainer:
         pos_examples_in_batch: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Jedno miejsce obliczeń:
+        Single GAT-step-based calculation:
         - x = model.compute_node_repr()  (1x GAT + projekcja)
         - pozytywy: pos_score, transformed_src=f_r(A), pos_dst_vec=B
         - negatywy: neg_score [B,K]
@@ -667,6 +661,14 @@ class RelGATTrainer:
             step_based=step_based,
         )
         return self._on_eval_end(mrr)
+
+    def _log_non_finite_loss_if_needed(self, loss):
+        if not torch.isfinite(loss):
+            self.log_adapter.log_metrics(
+                {"train/nonfinite_loss_steps": 1}, step=self.global_step
+            )
+            return True
+        return False
 
     def _log_step_if_needed(
         self,
