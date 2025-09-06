@@ -20,8 +20,8 @@ plwordnet-milvus \
 
 import argparse
 
-from relgat_llm.base.constants import ConstantsRelGATTrainer
-from relgat_llm.handlers.models.relgat import RelGATMainTrainerHandler
+from relgat_projector.base.constants import ConstantsRelGATTrainer
+from relgat_projector.handlers.models.relgat import RelGATMainTrainerHandler
 
 
 def get_args() -> argparse.Namespace:
@@ -126,6 +126,13 @@ def get_args() -> argparse.Namespace:
         default=ConstantsRelGATTrainer.Default.GAT_HEADS,
         help=f"Number of GAT attention heads "
         f"(default: {ConstantsRelGATTrainer.Default.GAT_HEADS})",
+    )
+    parser.add_argument(
+        "--project-to-input-size",
+        dest="project_to_input_size",
+        action="store_true",
+        help="Project to input size embeddings (if option is given). "
+        "If not set, then frozen-GAT will be learned",
     )
     parser.add_argument(
         "--dropout",
@@ -281,6 +288,15 @@ def get_args() -> argparse.Namespace:
 
     # Optional margin argument
     parser.add_argument("--margin", type=float, default=1.0)
+
+    # Multi objective loss function
+    parser.add_argument(
+        "--relgat-weight", dest="relgat_weight", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--cosine-weight", dest="cosine_weight", type=float, default=1.0
+    )
+    parser.add_argument("--mse-weight", dest="mse_weight", type=float, default=0.0)
 
     return parser.parse_args()
 

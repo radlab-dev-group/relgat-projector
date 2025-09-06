@@ -8,13 +8,13 @@ long_description = (
 )
 
 setup(
-    name="relgat-trainer",
-    version="0.1.0",
-    description="A lightweight trainer for Relational Graph Attention Networks (RelGAT).",
+    name="relgat-projector-trainer",
+    version="0.2.0",
+    description="A lightweight trainer for frozen-RelGAT with projection layer.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",
-    url="https://github.com/radlab-dev-group/relgat-llm",
+    url="https://github.com/radlab-dev-group/relgat-projector",
     author="RadLab team",
     author_email="pawel@radlab.dev",
     keywords=[
@@ -27,7 +27,7 @@ setup(
     ],
     python_requires=">=3.9",
     packages=find_packages(exclude=["tests", "tests.*", "examples", "examples.*"]),
-    py_modules=["relgat_llm"],
+    py_modules=["relgat_projector"],
     include_package_data=True,
     install_requires=[
         "numpy",
@@ -49,7 +49,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "relgat-base-train=relgat_apps.trainers.relgat_base:main",
+            "relgat-projector-train=relgat_projector_apps.trainers.relgat_projector:main",
         ]
     },
     classifiers=[

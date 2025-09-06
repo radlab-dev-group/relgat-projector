@@ -3,8 +3,8 @@ import torch
 import pickle
 import argparse
 
-from relgat_llm.base.constants import ConstantsRelGATTrainer
-from relgat_llm.trainer.relgat_base import RelGATTrainer
+from relgat_projector.base.constants import ConstantsRelGATTrainer
+from relgat_projector.trainer.relgat_projector import RelGATTrainer
 
 
 class RelGATMainTrainerHandler:
@@ -68,6 +68,7 @@ class RelGATMainTrainerHandler:
             "dropout_rel_attention": args.dropout_rel_attention,
             "architecture_name": args.architecture,
             "base_model_name": "relgat",
+            "project_to_input_size": args.project_to_input_size,
             # Larning rate management
             "lr": args.lr,
             "lr_scheduler": args.lr_scheduler,
@@ -88,7 +89,10 @@ class RelGATMainTrainerHandler:
             "self_adv_alpha": args.self_adv_alpha,
             "weight_decay": args.weight_decay,
             "grad_clip_norm": args.grad_clip_norm,
-            "eval_vectorized": True,
+            "eval_ks_ranks": [i for i in range(1, args.num_neg + 1)],
+            "relgat_weight": args.relgat_weight,
+            "cosine_weight": args.cosine_weight,
+            "mse_weight": args.mse_weight,
         }
 
         trainer = RelGATTrainer(
@@ -119,6 +123,7 @@ class RelGATMainTrainerHandler:
             dropout=run_cfg["dropout"],
             rel_attn_dropout=run_cfg["dropout_rel_attention"],
             architecture_name=run_cfg["architecture_name"],
+            project_to_input_size=run_cfg["project_to_input_size"],
             # Storage
             out_dir=run_cfg["out_dir"],
             max_checkpoints=run_cfg["max_checkpoints"],
@@ -136,7 +141,10 @@ class RelGATMainTrainerHandler:
             disable_edge_type_mask=run_cfg["disable_edge_type_mask"],
             use_self_adv_neg=run_cfg["use_self_adv_neg"],
             self_adv_alpha=run_cfg["self_adv_alpha"],
-            eval_vectorized=run_cfg["eval_vectorized"],
-            eval_ks=(1, 2, 3, 4, 5),
+            # Evaluation
+            eval_ks_ranks=run_cfg["eval_ks_ranks"],
+            relgat_weight=run_cfg["relgat_weight"],
+            cosine_weight=run_cfg["cosine_weight"],
+            mse_weight=run_cfg["mse_weight"],
         )
         return trainer

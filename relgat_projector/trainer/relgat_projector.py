@@ -4,21 +4,25 @@ import torch
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
 
-from relgat_llm.utils.random_seed import RandomSeed
-from relgat_llm.utils.logging_adapter import LoggerAdapter
+from relgat_projector.utils.random_seed import RandomSeed
+from relgat_projector.utils.logging_adapter import LoggerAdapter
 
-from relgat_llm.base.constants import ConstantsRelGATTrainer
-from relgat_llm.dataset.relgat_dataset import RelGATDataset
-from relgat_llm.handlers.storage import RelGATStorage
+from relgat_projector.base.constants import ConstantsRelGATTrainer
+from relgat_projector.dataset.relgat_dataset import RelGATDataset
+from relgat_projector.handlers.storage import RelGATStorage
 
-from relgat_llm.core.eval import RelgatEval
-from relgat_llm.core.loss import RelGATLoss
-from relgat_llm.core.lr import TrainingScheduler
-from relgat_llm.core.model.relgat_base.model import RelGATModel
-from relgat_llm.core.architecture.constructor import ModelArchitectureConstructor
+from relgat_projector.core.eval import RelgatEval
+from relgat_projector.core.loss import RelGATLoss, MultiObjectiveRelLoss
+from relgat_projector.core.lr import TrainingScheduler
+from relgat_projector.core.model.relgat_base.model import RelGATModel
+from relgat_projector.core.architecture.constructor import (
+    ModelArchitectureConstructor,
+)
 
-from relgat_llm.trainer.components.grad import compute_total_grad_norm
-from relgat_llm.trainer.components.relgat_batching import concat_pos_negs_to_tensors
+from relgat_projector.trainer.components.grad import compute_total_grad_norm
+from relgat_projector.trainer.components.relgat_batching import (
+    concat_pos_negs_to_tensors,
+)
 
 
 class RelGATTrainer:
@@ -55,6 +59,7 @@ class RelGATTrainer:
         rel_attn_dropout: float = 0.0,
         architecture_name: Optional[str] = None,
         base_model_name: Optional[str] = None,
+        project_to_input_size: bool = True,
         # Storage
         max_checkpoints: int = 5,
         out_dir: Optional[str] = None,
@@ -71,10 +76,12 @@ class RelGATTrainer:
         disable_edge_type_mask: bool = False,
         use_self_adv_neg: bool = False,
         self_adv_alpha: float = 1.0,
-        # evaluation options
-        eval_vectorized: bool = True,
         # use_amp: bool = False,
-        eval_ks: Tuple[int, ...] = (1, 2, 3, 4, 5),
+        # evaluation options
+        eval_ks_ranks: Optional[List] = None,
+        relgat_weight: float = 1.0,
+        cosine_weight: float = 1.0,
+        mse_weight: float = 0.0,
     ):
         # Experiments reproduction (seed)
         self.repr_training = RandomSeed(
@@ -92,6 +99,7 @@ class RelGATTrainer:
             architecture_name=architecture_name,
             base_model_name=base_model_name,
             run_config=run_config,
+            project_to_input_size=project_to_input_size,
         )
 
         # Training scheduler (total steps, warmup steps, etc.)
@@ -129,13 +137,15 @@ class RelGATTrainer:
             run_config=run_config,
             wandb_config=wandb_config,
             log_every_n_steps=log_every_n_steps,
+            log_to_wandb=wandb_config is not None,
+            log_to_console=True,
         )
 
         # Which loss should be used?
         use_self_adv_neg = run_config.get("use_self_adv_neg", use_self_adv_neg)
         if use_self_adv_neg is not None:
             use_self_adv_neg = bool(use_self_adv_neg)
-        self.loss = RelGATLoss(
+        self.relgat_loss = RelGATLoss(
             loss_type=(
                 "self_adversarial_loss"
                 if use_self_adv_neg
@@ -147,10 +157,18 @@ class RelGATTrainer:
             run_config=run_config,
         )
 
-        # ====================================================================
-        # debug_mode
-        self.debug_mode = True
+        # Multi-objective: relgat + reconstruction
+        self.multi_loss = None
+        if project_to_input_size:
+            self.multi_loss = MultiObjectiveRelLoss(
+                relgat_loss=self.relgat_loss,
+                relgat_weight=relgat_weight,
+                cosine_weight=cosine_weight,
+                mse_weight=mse_weight,
+                run_config=run_config,
+            )
 
+        # ====================================================================
         # Training environment
         self.run_config = run_config
         self.device = str(run_config.get("device", device))
@@ -174,7 +192,7 @@ class RelGATTrainer:
             run_config.get("disable_edge_type_mask", disable_edge_type_mask)
         )
         # Best mrr
-        self.best_mrr = -float("inf")
+        self.best_metric_value = -float("inf")
 
         # Logging steps
         self.global_step = 0
@@ -185,11 +203,11 @@ class RelGATTrainer:
             if eval_every_n_steps is not None and int(eval_every_n_steps) > 0
             else None
         )
-        # New evaluation config
-        self.eval_vectorized = bool(
-            run_config.get("eval_vectorized", eval_vectorized)
+        if eval_ks_ranks is None or not len(eval_ks_ranks):
+            eval_ks_ranks = (1, 2, 3)
+        self.eval_ks_ranks = tuple(
+            sorted(set(run_config.get("eval_ks_ranks", eval_ks_ranks)))
         )
-        self.eval_ks = tuple(run_config.get("eval_ks", list(eval_ks)))
 
         self._no_improve_steps = 0
 
@@ -210,6 +228,7 @@ class RelGATTrainer:
             dropout=self.architecture.dropout,
             relation_attn_dropout=self.architecture.dropout_rel_attention,
             gat_num_layers=self.architecture.gat_num_layers,
+            project_to_input_size=self.architecture.project_to_input_size,
         ).to(self.device)
 
         # Optimizer
@@ -224,85 +243,70 @@ class RelGATTrainer:
         # W&B initialization
         self.log_adapter.init_wandb_if_needed()
 
-    def on_epoch_end(self, *, epoch: int) -> None:
-        """
-        Callback executed at the end of each training epoch.
-        Default: no-op. Override to inject custom behavior.
-        """
-        return
-
-    def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
+    def evaluate(self, ks: Tuple[int, ...]):
         self.model.eval()
-
-        ks = tuple(sorted(set(ks)))  # sanitize
         total_mrr = 0.0
         total_hits = {k: 0.0 for k in ks}
         n_examples = 0
         total_loss = 0.0
         total_pos = 0
+        total_cos = 0.0
+        total_mse = 0.0
 
         with torch.no_grad():
             for batch in tqdm(
                 self.dataset.eval_loader, desc="Evaluation", leave=False
             ):
-                if not batch:
-                    continue
                 pos, *negs = zip(*batch)
+                pos_examples_in_batch = len(pos)
+                n_examples += pos_examples_in_batch
+
                 src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
                     pos, negs, device=self.device
                 )
+                pos_score, neg_score, batch_loss, mse, cosine = self._calculate_loss(
+                    src_ids=src_ids,
+                    rel_ids=rel_ids,
+                    dst_ids=dst_ids,
+                    pos_examples_in_batch=pos_examples_in_batch,
+                    phase="eval",
+                )
 
-                pos_examples_in_batch = len(pos)
-                scores = self._forward_model_scores(
-                    src_ids, rel_ids, dst_ids, phase="eval"
-                )
-                pos_score, neg_score = self._split_scores(
-                    scores, pos_examples_in_batch
-                )
-
-                # Loss for reporting
-                batch_loss = self.loss.prepare_scores_and_compute_loss(
-                    pos_score=pos_score, neg_score=neg_score
-                )
                 total_loss += batch_loss.item() * pos_examples_in_batch
                 total_pos += pos_examples_in_batch
 
-                # Metrics: vectorized or per-sample
-                if self.eval_vectorized:
-                    mrr_b, hits_b = RelgatEval.compute_batch_metrics_vectorized(
-                        pos_score=pos_score, neg_score=neg_score, ks=ks
-                    )
-                    total_mrr += mrr_b * pos_examples_in_batch
-                    for k in ks:
-                        total_hits[k] += hits_b[k] * pos_examples_in_batch
-                    n_examples += pos_examples_in_batch
-                else:
-                    for i in range(pos_examples_in_batch):
-                        cand_scores = torch.cat(
-                            [pos_score[i].unsqueeze(0), neg_score[i]], dim=0
-                        )
-                        mrr, hits = RelgatEval.compute_mrr_hits(
-                            cand_scores, true_idx=0, ks=ks
-                        )
-                        total_mrr += mrr
-                        for k in ks:
-                            total_hits[k] += hits[k]
-                        n_examples += 1
+                # Metrics -------------------------------------------
+                # TODO: Move to the new method
+                mrr_b, hits_b = RelgatEval.compute_mrr_hits(
+                    pos_score=pos_score, neg_score=neg_score, ks=ks
+                )
+                total_mrr += mrr_b * pos_examples_in_batch
+                for k in ks:
+                    total_hits[k] += hits_b[k] * pos_examples_in_batch
 
-                # Optional evaluation logging of score statistics
+                metrics = {
+                    "eval/pos_score_mean": (
+                        pos_score.detach().mean().item()
+                        if pos_examples_in_batch > 0
+                        else 0.0
+                    ),
+                    "eval/neg_score_mean": (
+                        neg_score.detach().mean().item()
+                        if pos_examples_in_batch > 0
+                        else 0.0
+                    ),
+                }
+
+                if cosine is not None:
+                    total_cos += cosine
+                    metrics["eval/cosine_mean_batch"] = cosine
+
+                if mse is not None:
+                    total_mse += mse
+                    metrics["eval/mse_mean_batch"] = mse
+
                 self.log_adapter.log_metrics(
-                    metrics={
-                        "eval/pos_score_mean": (
-                            pos_score.detach().clamp(-20.0, 20.0).mean().item()
-                            if pos_examples_in_batch > 0
-                            else 0.0
-                        ),
-                        "eval/neg_score_mean": (
-                            neg_score.detach().clamp(-20.0, 20.0).mean().item()
-                            if pos_examples_in_batch > 0
-                            else 0.0
-                        ),
-                    },
+                    metrics=metrics,
                     step=self.global_step,
                 )
 
@@ -310,8 +314,14 @@ class RelGATTrainer:
         avg_mrr = total_mrr / n_examples
         avg_hits = {k: total_hits[k] / n_examples for k in ks}
         avg_eval_loss = total_loss / max(1, total_pos)
+        avg_cosine = None
+        if total_cos > 0.0:
+            avg_cosine = total_cos / max(1, total_pos)
+        avg_mse = None
+        if total_mse > 0.0:
+            avg_mse = total_mse / max(1, total_pos)
 
-        return avg_mrr, avg_hits, avg_eval_loss
+        return avg_mrr, avg_hits, avg_eval_loss, avg_cosine, avg_mse
 
     def train(self, epochs: int):
         # Prepare the number of total steps, warmup steps and learning scheduler
@@ -322,7 +332,7 @@ class RelGATTrainer:
             optimizer=self.optimizer,
         )
 
-        self._log_metrics_on_begin()
+        self._log_begin_information()
 
         for epoch in range(1, epochs + 1):
             epoch_loss = 0.0
@@ -337,7 +347,6 @@ class RelGATTrainer:
                 running_examples=running_examples,
             )
 
-            self.on_epoch_end(epoch=epoch)
             if self._eval_if_needed_and_stop_if_needed(
                 epoch=epoch, epoch_loss=epoch_loss
             ):
@@ -375,35 +384,30 @@ class RelGATTrainer:
                 pos, negs, device=self.device
             )
 
-            self.optimizer.zero_grad(set_to_none=True)
-            scores = self._forward_model_scores(
-                src_ids, rel_ids, dst_ids, phase="train"
+            pos_score, neg_score, loss, mse, cosine = self._calculate_loss(
+                src_ids=src_ids,
+                rel_ids=rel_ids,
+                dst_ids=dst_ids,
+                pos_examples_in_batch=pos_examples_in_batch,
+                phase="train",
             )
-            pos_score, neg_score = self._split_scores(scores, pos_examples_in_batch)
-
-            loss = self.loss.prepare_scores_and_compute_loss(
-                pos_score=pos_score, neg_score=neg_score
-            )
-            if not torch.isfinite(loss):
-                self.log_adapter.log_metrics(
-                    {"train/nonfinite_loss_steps": 1}, step=self.global_step
-                )
-                print("Non‑finite loss encountered. Skipping step.")
+            if self._log_non_finite_loss_if_needed(loss=loss):
                 continue
-            loss.backward()
 
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
             if self.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=self.grad_clip_norm,
                 )
-
             self.optimizer.step()
             if self.training_scheduler.scheduler is not None:
                 self.training_scheduler.scheduler.step()
 
             # TransE stabilization of scale:
             #   -> normalization of relation vectors after each step.
+            # TODO: Normalization have to be done within scorer
             if getattr(self, "scorer_type", "").lower() == "transe":
                 with torch.no_grad():
                     w = self.model.scorer.rel_emb.weight
@@ -417,15 +421,17 @@ class RelGATTrainer:
             running_examples += pos_examples_in_batch
 
             self.global_step += 1
-
             running_loss, running_examples = self._log_step_if_needed(
                 epoch=epoch,
                 step_in_epoch=step_in_epoch,
                 step_start_time=step_start_time,
                 running_loss=running_loss,
                 running_examples=running_examples,
-                scores=scores,
+                pos_score=pos_score,
+                neg_score=neg_score,
                 pos_examples_in_batch=pos_examples_in_batch,
+                cosine=cosine,
+                mse=mse,
             )
 
             if self._eval_step_if_needed_and_end_training(
@@ -435,18 +441,70 @@ class RelGATTrainer:
 
         return epoch_loss, running_loss, running_examples
 
+    def _calculate_loss(
+        self, src_ids, rel_ids, dst_ids, pos_examples_in_batch, phase: str
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        cosine, mse = None, None
+        if not self.architecture.project_to_input_size:
+            scores, transformed, dst_vec = self._forward_model_scores(
+                src_ids,
+                rel_ids,
+                dst_ids,
+                phase=phase,
+                transform_to_input_if_possible=False,
+            )
+            pos_score, neg_score = self._split_scores(scores, pos_examples_in_batch)
+            loss = self.relgat_loss.prepare_scores_and_compute_loss(
+                pos_score=pos_score, neg_score=neg_score
+            )
+        else:
+            pos_score, neg_score, transformed_src, pos_dst_vec = (
+                self._forward_scores_model_scores_transform(
+                    src_ids=src_ids,
+                    rel_ids=rel_ids,
+                    dst_ids=dst_ids,
+                    pos_examples_in_batch=pos_examples_in_batch,
+                )
+            )
+            loss = self.multi_loss(
+                pos_score=pos_score,
+                neg_score=neg_score,
+                transformed_src=transformed_src,
+                dst_vec=pos_dst_vec,
+            )
+            # Reconstruction for logging
+            cosine = RelgatEval.batch_cosine_similarity(
+                transformed_src.detach(), pos_dst_vec.detach()
+            )
+            mse = RelgatEval.batch_mse(
+                transformed_src.detach(), pos_dst_vec.detach()
+            )
+        return pos_score, neg_score, loss, mse, cosine
+
     def _forward_model_scores(
         self,
         src_ids: torch.Tensor,
         rel_ids: torch.Tensor,
         dst_ids: torch.Tensor,
         phase: str,
-    ) -> torch.Tensor:
+        transform_to_input_if_possible: bool = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Shared forward pass with non-finite handling and contextual logging.
         phase: 'train' or 'eval' (affects metric names)
         """
-        scores = self.model(src_ids, rel_ids, dst_ids)
+        scores, transformed, dst_vec = self.model(
+            src_ids,
+            rel_ids,
+            dst_ids,
+            transform_to_input_if_possible=transform_to_input_if_possible,
+        )
 
         nonfinite = (~torch.isfinite(scores)).sum().item()
         if nonfinite > 0:
@@ -455,7 +513,55 @@ class RelGATTrainer:
                 step=self.global_step,
             )
             scores = torch.nan_to_num(scores, nan=0.0, neginf=-1e9, posinf=1e9)
-        return scores
+        return scores, transformed, dst_vec
+
+    def _forward_scores_model_scores_transform(
+        self,
+        *,
+        src_ids: torch.Tensor,
+        rel_ids: torch.Tensor,
+        dst_ids: torch.Tensor,
+        pos_examples_in_batch: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Single GAT-step-based calculation:
+        - x = model.compute_node_repr()  (1x GAT + projekcja)
+        - pozytywy: pos_score, transformed_src=f_r(A), pos_dst_vec=B
+        - negatywy: neg_score [B,K]
+        Zwraca: (pos_score, neg_score, transformed_src, pos_dst_vec)
+        """
+        x = self.model.single_gat_step()  # [N, D_sc]
+
+        # Positives
+        pos_src_idx = src_ids[:pos_examples_in_batch]
+        pos_dst_idx = dst_ids[:pos_examples_in_batch]
+        pos_rel_ids = rel_ids[:pos_examples_in_batch]
+
+        pos_src_vec = x[pos_src_idx]  # [B, D]
+        pos_dst_vec = x[pos_dst_idx]  # [B, D]
+        pos_score = self.model.scorer(pos_src_vec, pos_rel_ids, pos_dst_vec)  # [B]
+        transformed_src = self.model.scorer.transform(
+            pos_src_vec, pos_rel_ids
+        )  # [B, D]
+
+        # Negatives
+        if self.dataset.num_neg > 0:
+            neg_src_vec = x[src_ids[pos_examples_in_batch:]]  # [B*K, D]
+            neg_dst_vec = x[dst_ids[pos_examples_in_batch:]]  # [B*K, D]
+            neg_rel = rel_ids[pos_examples_in_batch:]  # [B*K]
+            neg_scores_flat = self.model.scorer(
+                neg_src_vec, neg_rel, neg_dst_vec
+            )  # [B*K]
+            neg_score = neg_scores_flat.view(
+                pos_examples_in_batch, self.dataset.num_neg
+            )  # [B, K]
+        else:
+            neg_score = pos_score.new_zeros((pos_examples_in_batch, 0))
+
+        # Sanitization (NaN/Inf)
+        pos_score = torch.nan_to_num(pos_score, nan=0.0, neginf=-1e9, posinf=1e9)
+        neg_score = torch.nan_to_num(neg_score, nan=0.0, neginf=-1e9, posinf=1e9)
+        return pos_score, neg_score, transformed_src, pos_dst_vec
 
     def _split_scores(
             self, scores: torch.Tensor, pos_examples_in_batch: int
@@ -482,23 +588,12 @@ class RelGATTrainer:
         self,
         *,
         epoch: int,
-        avg_train_loss: float,
         mrr: float,
         hits: Dict[int, float],
         eval_loss: float,
-        step_based: bool,
+        avg_cosine: Optional[float] = None,
+        avg_mse: Optional[float] = None,
     ) -> None:
-        hits_str = ", ".join([f"Hits@{k}: {hits[k]:.4f}" for k in sorted(hits)])
-        if step_based:
-            print(
-                f"\n=== Step {self.global_step:12d} – "
-                f"train loss: {avg_train_loss:.4f}"
-            )
-        else:
-            print(f"\n=== Epoch {epoch:02d} – train loss: {avg_train_loss:.4f}")
-
-        print(f"   - eval – loss: {eval_loss:.4f} | " f"MRR: {mrr:.4f} | {hits_str}")
-
         metrics = {
             "epoch": epoch,
             "eval/loss": eval_loss,
@@ -507,16 +602,26 @@ class RelGATTrainer:
         for ks in hits.keys():
             metrics[f"eval/hits@{ks}"] = hits.get(ks, 0.0)
 
+        if avg_cosine is not None:
+            metrics["eval/cosine"] = avg_cosine
+
+        if avg_mse is not None:
+            metrics["eval/mse"] = avg_mse
+
         self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
 
-    def _on_eval_end(self, mrr: float) -> bool:
+    def _on_eval_end(self, mrr: float, cosine: Optional[float] = None) -> bool:
         """
-        Handle best metric tracking, checkpointing, and early stopping counter.
+        Handle the best metric tracking, checkpointing, and early stopping counter.
         Returns True if early stopping should be triggered.
         """
-        improved = mrr > self.best_mrr
+        metric_value = mrr
+        if cosine is not None:
+            metric_value = cosine
+
+        improved = metric_value > self.best_metric_value
         if improved:
-            self.best_mrr = mrr
+            self.best_metric_value = metric_value
             if (
                 self.storage.save_every_n_steps is not None
                 and self.global_step % self.storage.save_every_n_steps == 0
@@ -544,28 +649,31 @@ class RelGATTrainer:
             return True
         return False
 
-    def _run_eval_and_maybe_early_stop(
-        self,
-        *,
-        epoch: int,
-        avg_train_loss: float,
-        step_based: bool,
-    ) -> bool:
+    def _run_eval_and_maybe_early_stop(self, *, epoch: int) -> bool:
         """
-        Run evaluation, log once, update best/early-stop. Returns True if training should stop.
+        Run evaluation, log once, update the best/early-stop.
+        Returns True if training should stop.
         """
-        # Use default eval_ks unless overridden here
-        ks = tuple(sorted(set(self.eval_ks if self.eval_ks else (1, 2, 3))))
-        mrr, hits, eval_loss = self.evaluate(ks=ks)
+        avg_mrr, avg_hits, avg_eval_loss, avg_cosine, avg_mse = self.evaluate(
+            ks=self.eval_ks_ranks
+        )
         self._print_and_log_eval(
             epoch=epoch,
-            avg_train_loss=avg_train_loss,
-            mrr=mrr,
-            hits=hits,
-            eval_loss=eval_loss,
-            step_based=step_based,
+            mrr=avg_mrr,
+            hits=avg_hits,
+            eval_loss=avg_eval_loss,
+            avg_cosine=avg_cosine,
+            avg_mse=avg_mse,
         )
-        return self._on_eval_end(mrr)
+        return self._on_eval_end(avg_mrr, avg_cosine)
+
+    def _log_non_finite_loss_if_needed(self, loss):
+        if not torch.isfinite(loss):
+            self.log_adapter.log_metrics(
+                {"train/nonfinite_loss_steps": 1}, step=self.global_step
+            )
+            return True
+        return False
 
     def _log_step_if_needed(
         self,
@@ -574,8 +682,11 @@ class RelGATTrainer:
         step_start_time,
         running_loss: float,
         running_examples: int,
-        scores,
+        pos_score,
+        neg_score,
         pos_examples_in_batch: int,
+        mse: Optional[float] = None,
+        cosine: Optional[float] = None,
     ):
         if self.global_step % self.log_adapter.log_every_n_steps != 0:
             return running_loss, running_examples
@@ -586,6 +697,11 @@ class RelGATTrainer:
         grad_norm = -float("inf")
         if self.log_grad_norm:
             grad_norm = compute_total_grad_norm(self.model)
+
+        # Ranking metrics
+        mrr, hits = RelgatEval.compute_mrr_hits(
+            pos_score=pos_score, neg_score=neg_score, ks=self.eval_ks_ranks
+        )
 
         avg_running_loss = running_loss / max(1, running_examples)
         current_lr = (
@@ -609,26 +725,24 @@ class RelGATTrainer:
             "train/grad_norm": grad_norm,
             "train/lr": current_lr,
             "train/step_time": step_time,
+            "train/mrr": mrr,
             "train/pos_score_mean": (
-                (scores[:pos_examples_in_batch].detach().clamp(-20.0, 20.0))
-                .mean()
-                .item()
+                pos_score.detach().mean().item()
                 if pos_examples_in_batch > 0
                 else 0.0
             ),
             "train/neg_score_mean": (
-                (
-                    scores[pos_examples_in_batch:]
-                    .view(pos_examples_in_batch, self.dataset.num_neg)
-                    .detach()
-                    .clamp(-20.0, 20.0)
-                )
-                .mean()
-                .item()
-                if (scores.numel() - pos_examples_in_batch) > 0
-                else 0.0
+                neg_score.detach().mean().item() if neg_score.numel() > 0 else 0.0
             ),
         }
+        # Multi loss
+        if self.architecture.project_to_input_size:
+            metrics["train/cosine"] = float(cosine)
+            metrics["train/mse"] = float(mse)
+
+        # Hits@k
+        for k in self.eval_ks_ranks:
+            metrics[f"train/hits@{k}"] = hits.get(k, 0.0)
 
         self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
 
@@ -640,13 +754,7 @@ class RelGATTrainer:
             or self.global_step % self.eval_every_n_steps != 0
         ):
             return False
-
-        avg_train_loss = epoch_loss / len(self.dataset.train_dataset)
-        should_stop = self._run_eval_and_maybe_early_stop(
-            epoch=epoch,
-            avg_train_loss=avg_train_loss,
-            step_based=True,
-        )
+        should_stop = self._run_eval_and_maybe_early_stop(epoch=epoch)
         if should_stop:
             return True
 
@@ -654,16 +762,15 @@ class RelGATTrainer:
         self.model.train()
         return False
 
-    def _log_metrics_on_begin(self):
+    def _log_begin_information(self):
         self.log_adapter.log_metrics(
             metrics={
                 "scheduler/total_steps": self.training_scheduler.total_steps,
                 "scheduler/warmup_steps": self.training_scheduler.warmup_steps,
                 "scheduler/type": self.training_scheduler.scheduler_type,
-                "config/use_self_adv_neg": float(self.loss.use_self_adv_neg),
-                "config/self_adv_alpha": float(self.loss.self_adv_alpha),
+                "config/use_self_adv_neg": float(self.relgat_loss.use_self_adv_neg),
+                "config/self_adv_alpha": float(self.relgat_loss.self_adv_alpha),
                 "train/base_lr": self.training_scheduler.base_lr,
-                "config/eval_vectorized": float(self.eval_vectorized),
             },
             step=self.global_step,
         )
@@ -694,10 +801,5 @@ class RelGATTrainer:
     def _eval_if_needed_and_stop_if_needed(self, epoch, epoch_loss):
         should_stop = False
         if self.eval_every_n_steps is None:
-            avg_train_loss = epoch_loss / len(self.dataset.train_dataset)
-            should_stop = self._run_eval_and_maybe_early_stop(
-                epoch=epoch,
-                avg_train_loss=avg_train_loss,
-                step_based=False,
-            )
+            should_stop = self._run_eval_and_maybe_early_stop(epoch=epoch)
         return should_stop

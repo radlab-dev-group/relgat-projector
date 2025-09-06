@@ -7,7 +7,7 @@ from pathlib import Path
 from collections import deque
 from typing import Tuple, List, Any, Dict, Optional
 
-from relgat_llm.base.constants import ConstantsRelGATTrainer
+from relgat_projector.base.constants import ConstantsRelGATTrainer
 
 
 class RelGATStorage:

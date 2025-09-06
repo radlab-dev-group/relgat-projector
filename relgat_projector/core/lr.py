@@ -4,7 +4,7 @@ import torch
 
 from typing import Any, Dict, Optional
 
-from relgat_llm.base.constants import ConstantsRelGATTrainer
+from relgat_projector.base.constants import ConstantsRelGATTrainer
 
 
 class TrainingScheduler:
