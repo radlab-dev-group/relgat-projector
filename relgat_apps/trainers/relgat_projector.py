@@ -20,8 +20,8 @@ plwordnet-milvus \
 
 import argparse
 
-from relgat_llm.base.constants import ConstantsRelGATTrainer
-from relgat_llm.handlers.models.relgat import RelGATMainTrainerHandler
+from relgat_projector.base.constants import ConstantsRelGATTrainer
+from relgat_projector.handlers.models.relgat import RelGATMainTrainerHandler
 
 
 def get_args() -> argparse.Namespace:

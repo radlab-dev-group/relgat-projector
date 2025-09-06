@@ -27,7 +27,7 @@ setup(
     ],
     python_requires=">=3.9",
     packages=find_packages(exclude=["tests", "tests.*", "examples", "examples.*"]),
-    py_modules=["relgat_llm"],
+    py_modules=["relgat_projector"],
     include_package_data=True,
     install_requires=[
         "numpy",
@@ -49,7 +49,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "relgat-base-train=relgat_apps.trainers.relgat_base:main",
+            "relgat-projector-train=relgat_apps.trainers.relgat_projector:main",
         ]
     },
     classifiers=[

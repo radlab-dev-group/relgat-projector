@@ -5,8 +5,8 @@ import torch.nn as nn
 
 from typing import Tuple, Optional
 
-from relgat_llm.core.scorer import DistMultScorer, TransEScorer
-from relgat_llm.core.model.relgat_base.layer import RelGATLayer
+from relgat_projector.core.scorer import DistMultScorer, TransEScorer
+from relgat_projector.core.model.relgat_base.layer import RelGATLayer
 
 
 class RelGATModel(nn.Module):
