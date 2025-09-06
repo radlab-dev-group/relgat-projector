@@ -12,7 +12,7 @@ from relgat_llm.dataset.relgat_dataset import RelGATDataset
 from relgat_llm.handlers.storage import RelGATStorage
 
 from relgat_llm.core.eval import RelgatEval
-from relgat_llm.core.loss import RelGATLoss
+from relgat_llm.core.loss import RelGATLoss, MultiObjectiveRelLoss
 from relgat_llm.core.lr import TrainingScheduler
 from relgat_llm.core.model.relgat_base.model import RelGATModel
 from relgat_llm.core.architecture.constructor import ModelArchitectureConstructor
@@ -137,7 +137,7 @@ class RelGATTrainer:
         use_self_adv_neg = run_config.get("use_self_adv_neg", use_self_adv_neg)
         if use_self_adv_neg is not None:
             use_self_adv_neg = bool(use_self_adv_neg)
-        self.loss = RelGATLoss(
+        self.relgat_loss = RelGATLoss(
             loss_type=(
                 "self_adversarial_loss"
                 if use_self_adv_neg
@@ -146,6 +146,15 @@ class RelGATTrainer:
             self_adv_alpha=self_adv_alpha,
             margin=margin,
             clamp_limit=20,
+            run_config=run_config,
+        )
+
+        # Multi-objective: relgat + reconstruction
+        self.multi_loss = MultiObjectiveRelLoss(
+            relgat_loss=self.relgat_loss,
+            relgat_weight=float(run_config.get("relgat_weight", 1.0)),
+            cosine_weight=float(run_config.get("cosine_weight", 1.0)),
+            mse_weight=float(run_config.get("mse_weight", 0.0)),
             run_config=run_config,
         )
 
@@ -227,13 +236,6 @@ class RelGATTrainer:
         # W&B initialization
         self.log_adapter.init_wandb_if_needed()
 
-    def on_epoch_end(self, *, epoch: int) -> None:
-        """
-        Callback executed at the end of each training epoch.
-        Default: no-op. Override to inject custom behavior.
-        """
-        return
-
     def evaluate(self, ks: Tuple[int, ...] = (1, 3, 10)):
         self.model.eval()
 
@@ -256,15 +258,22 @@ class RelGATTrainer:
                 )
 
                 pos_examples_in_batch = len(pos)
-                scores = self._forward_model_scores(
-                    src_ids, rel_ids, dst_ids, phase="eval"
+                scores, transformed, dst_vec = self._forward_model_scores(
+                    src_ids,
+                    rel_ids,
+                    dst_ids,
+                    phase="eval",
+                    transform_to_input_if_possible=False,
                 )
                 pos_score, neg_score = self._split_scores(
                     scores, pos_examples_in_batch
                 )
 
+                if self.multi_loss is not None:
+                    raise Exception("Not implemented yet!")
+
                 # Loss for reporting
-                batch_loss = self.loss.prepare_scores_and_compute_loss(
+                batch_loss = self.relgat_loss.prepare_scores_and_compute_loss(
                     pos_score=pos_score, neg_score=neg_score
                 )
                 total_loss += batch_loss.item() * pos_examples_in_batch
@@ -340,7 +349,6 @@ class RelGATTrainer:
                 running_examples=running_examples,
             )
 
-            self.on_epoch_end(epoch=epoch)
             if self._eval_if_needed_and_stop_if_needed(
                 epoch=epoch, epoch_loss=epoch_loss
             ):
@@ -377,30 +385,28 @@ class RelGATTrainer:
             src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
                 pos, negs, device=self.device
             )
-
-            self.optimizer.zero_grad(set_to_none=True)
-            scores = self._forward_model_scores(
-                src_ids, rel_ids, dst_ids, phase="train"
+            pos_score, neg_score, loss, mse, cosine = self._calculate_loss(
+                src_ids=src_ids,
+                rel_ids=rel_ids,
+                dst_ids=dst_ids,
+                pos_examples_in_batch=pos_examples_in_batch,
+                phase="train",
             )
-            pos_score, neg_score = self._split_scores(scores, pos_examples_in_batch)
 
-            loss = self.loss.prepare_scores_and_compute_loss(
-                pos_score=pos_score, neg_score=neg_score
-            )
             if not torch.isfinite(loss):
                 self.log_adapter.log_metrics(
                     {"train/nonfinite_loss_steps": 1}, step=self.global_step
                 )
                 print("Non‑finite loss encountered. Skipping step.")
                 continue
-            loss.backward()
 
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
             if self.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=self.grad_clip_norm,
                 )
-
             self.optimizer.step()
             if self.training_scheduler.scheduler is not None:
                 self.training_scheduler.scheduler.step()
@@ -420,15 +426,16 @@ class RelGATTrainer:
             running_examples += pos_examples_in_batch
 
             self.global_step += 1
-
             running_loss, running_examples = self._log_step_if_needed(
                 epoch=epoch,
                 step_in_epoch=step_in_epoch,
                 step_start_time=step_start_time,
                 running_loss=running_loss,
                 running_examples=running_examples,
-                scores=scores,
+                pos_score=pos_score,
+                neg_score=neg_score,
                 pos_examples_in_batch=pos_examples_in_batch,
+                mse=mse,
             )
 
             if self._eval_step_if_needed_and_end_training(
@@ -438,18 +445,70 @@ class RelGATTrainer:
 
         return epoch_loss, running_loss, running_examples
 
+    def _calculate_loss(
+        self, src_ids, rel_ids, dst_ids, pos_examples_in_batch, phase: str
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        cosine, mse = None, None
+        if self.multi_loss is None:
+            scores, transformed, dst_vec = self._forward_model_scores(
+                src_ids,
+                rel_ids,
+                dst_ids,
+                phase=phase,
+                transform_to_input_if_possible=False,
+            )
+            pos_score, neg_score = self._split_scores(scores, pos_examples_in_batch)
+            loss = self.relgat_loss.prepare_scores_and_compute_loss(
+                pos_score=pos_score, neg_score=neg_score
+            )
+        else:
+            pos_score, neg_score, transformed_src, pos_dst_vec = (
+                self._forward_scores_model_scores_transform(
+                    src_ids=src_ids,
+                    rel_ids=rel_ids,
+                    dst_ids=dst_ids,
+                    pos_examples_in_batch=pos_examples_in_batch,
+                )
+            )
+            loss = self.multi_loss(
+                pos_score=pos_score,
+                neg_score=neg_score,
+                transformed_src=transformed_src,
+                dst_vec=pos_dst_vec,
+            )
+            # Reconstruction for logging
+            cosine = RelgatEval.batch_cosine_similarity(
+                transformed_src.detach(), pos_dst_vec.detach()
+            )
+            mse = RelgatEval.batch_mse(
+                transformed_src.detach(), pos_dst_vec.detach()
+            )
+        return pos_score, neg_score, loss, mse, cosine
+
     def _forward_model_scores(
         self,
         src_ids: torch.Tensor,
         rel_ids: torch.Tensor,
         dst_ids: torch.Tensor,
         phase: str,
-    ) -> torch.Tensor:
+        transform_to_input_if_possible: bool = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Shared forward pass with non-finite handling and contextual logging.
         phase: 'train' or 'eval' (affects metric names)
         """
-        scores = self.model(src_ids, rel_ids, dst_ids)
+        scores, transformed, dst_vec = self.model(
+            src_ids,
+            rel_ids,
+            dst_ids,
+            transform_to_input_if_possible=transform_to_input_if_possible,
+        )
 
         nonfinite = (~torch.isfinite(scores)).sum().item()
         if nonfinite > 0:
@@ -458,7 +517,55 @@ class RelGATTrainer:
                 step=self.global_step,
             )
             scores = torch.nan_to_num(scores, nan=0.0, neginf=-1e9, posinf=1e9)
-        return scores
+        return scores, transformed, dst_vec
+
+    def _forward_scores_model_scores_transform(
+        self,
+        *,
+        src_ids: torch.Tensor,
+        rel_ids: torch.Tensor,
+        dst_ids: torch.Tensor,
+        pos_examples_in_batch: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Jedno miejsce obliczeń:
+        - x = model.compute_node_repr()  (1x GAT + projekcja)
+        - pozytywy: pos_score, transformed_src=f_r(A), pos_dst_vec=B
+        - negatywy: neg_score [B,K]
+        Zwraca: (pos_score, neg_score, transformed_src, pos_dst_vec)
+        """
+        x = self.model.single_gat_step()  # [N, D_sc]
+
+        # Positives
+        pos_src_idx = src_ids[:pos_examples_in_batch]
+        pos_dst_idx = dst_ids[:pos_examples_in_batch]
+        pos_rel_ids = rel_ids[:pos_examples_in_batch]
+
+        pos_src_vec = x[pos_src_idx]  # [B, D]
+        pos_dst_vec = x[pos_dst_idx]  # [B, D]
+        pos_score = self.model.scorer(pos_src_vec, pos_rel_ids, pos_dst_vec)  # [B]
+        transformed_src = self.model.scorer.transform(
+            pos_src_vec, pos_rel_ids
+        )  # [B, D]
+
+        # Negatives
+        if self.dataset.num_neg > 0:
+            neg_src_vec = x[src_ids[pos_examples_in_batch:]]  # [B*K, D]
+            neg_dst_vec = x[dst_ids[pos_examples_in_batch:]]  # [B*K, D]
+            neg_rel = rel_ids[pos_examples_in_batch:]  # [B*K]
+            neg_scores_flat = self.model.scorer(
+                neg_src_vec, neg_rel, neg_dst_vec
+            )  # [B*K]
+            neg_score = neg_scores_flat.view(
+                pos_examples_in_batch, self.dataset.num_neg
+            )  # [B, K]
+        else:
+            neg_score = pos_score.new_zeros((pos_examples_in_batch, 0))
+
+        # Sanitization (NaN/Inf)
+        pos_score = torch.nan_to_num(pos_score, nan=0.0, neginf=-1e9, posinf=1e9)
+        neg_score = torch.nan_to_num(neg_score, nan=0.0, neginf=-1e9, posinf=1e9)
+        return pos_score, neg_score, transformed_src, pos_dst_vec
 
     def _split_scores(
         self, scores: torch.Tensor, pos_examples_in_batch: int
@@ -568,8 +675,11 @@ class RelGATTrainer:
         step_start_time,
         running_loss: float,
         running_examples: int,
-        scores,
+        pos_score,
+        neg_score,
         pos_examples_in_batch: int,
+        mse: Optional[float] = None,
+        cosine: Optional[float] = None,
     ):
         if self.global_step % self.log_adapter.log_every_n_steps != 0:
             return running_loss, running_examples
@@ -580,6 +690,11 @@ class RelGATTrainer:
         grad_norm = -float("inf")
         if self.log_grad_norm:
             grad_norm = compute_total_grad_norm(self.model)
+
+        # Ranking metrics
+        mrr, hits = RelgatEval.compute_batch_metrics_vectorized(
+            pos_score=pos_score, neg_score=neg_score, ks=self.eval_ks
+        )
 
         avg_running_loss = running_loss / max(1, running_examples)
         current_lr = (
@@ -603,26 +718,24 @@ class RelGATTrainer:
             "train/grad_norm": grad_norm,
             "train/lr": current_lr,
             "train/step_time": step_time,
+            "train/mrr": mrr,
             "train/pos_score_mean": (
-                (scores[:pos_examples_in_batch].detach().clamp(-20.0, 20.0))
-                .mean()
-                .item()
+                pos_score.detach().mean().item()
                 if pos_examples_in_batch > 0
                 else 0.0
             ),
             "train/neg_score_mean": (
-                (
-                    scores[pos_examples_in_batch:]
-                    .view(pos_examples_in_batch, self.dataset.num_neg)
-                    .detach()
-                    .clamp(-20.0, 20.0)
-                )
-                .mean()
-                .item()
-                if (scores.numel() - pos_examples_in_batch) > 0
-                else 0.0
+                neg_score.detach().mean().item() if neg_score.numel() > 0 else 0.0
             ),
         }
+        # Multi loss
+        if self.multi_loss is not None:
+            metrics["train/cosine"] = float(cosine)
+            metrics["train/mse"] = float(mse)
+
+        # Hits@k
+        for k in self.eval_ks:
+            metrics[f"train/hits@{k}"] = hits.get(k, 0.0)
 
         self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
 
@@ -654,8 +767,8 @@ class RelGATTrainer:
                 "scheduler/total_steps": self.training_scheduler.total_steps,
                 "scheduler/warmup_steps": self.training_scheduler.warmup_steps,
                 "scheduler/type": self.training_scheduler.scheduler_type,
-                "config/use_self_adv_neg": float(self.loss.use_self_adv_neg),
-                "config/self_adv_alpha": float(self.loss.self_adv_alpha),
+                "config/use_self_adv_neg": float(self.relgat_loss.use_self_adv_neg),
+                "config/self_adv_alpha": float(self.relgat_loss.self_adv_alpha),
                 "train/base_lr": self.training_scheduler.base_lr,
                 "config/eval_vectorized": float(self.eval_vectorized),
             },
