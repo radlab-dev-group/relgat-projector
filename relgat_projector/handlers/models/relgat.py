@@ -4,7 +4,7 @@ import pickle
 import argparse
 
 from relgat_projector.base.constants import ConstantsRelGATTrainer
-from relgat_projector.trainer.relgat_base import RelGATTrainer
+from relgat_projector.trainer.relgat_projector import RelGATTrainer
 
 
 class RelGATMainTrainerHandler:
