@@ -6,7 +6,7 @@
 # =============================================================================
 # Device: {cuda, cpu, cuda:x}
 DEVICE="cuda"
-CUDA_DEVICES="0"
+CUDA_DEVICES="2"
 MAX_CHECKPOINTS=5
 
 # Ratio of training data
@@ -25,9 +25,9 @@ then
   BATCH_SIZE=64
   NUM_NEG_TO_POS=8
 
-  GAT_OUT_DIM=128
-  NUM_OF_LAYERS=2
-  NUM_OF_HEADS=12
+  GAT_OUT_DIM=256
+  NUM_OF_LAYERS=1
+  NUM_OF_HEADS=16
 
   LEARNING_RATE=0.00009
 
@@ -135,7 +135,7 @@ DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset
 # Available datasets:
 #  - FULL: dataset_syn_two_way
 #  - SAMPLE: dataset_syn_two_way__limit1k
-DATASET_DIR="${DATASET_ROOT}/dataset_syn_two_way__limit1k"
+DATASET_DIR="${DATASET_ROOT}/dataset_syn_two_way"
 LU_EMBEDDING="${DATASET_DIR}/lexical_units_embedding.pickle"
 RELS_MAPPING="${DATASET_DIR}/relation_to_idx.json"
 RELS_TRIPLETS="${DATASET_DIR}/relations_triplets.json"
