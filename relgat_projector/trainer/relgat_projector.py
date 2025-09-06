@@ -78,7 +78,7 @@ class RelGATTrainer:
         self_adv_alpha: float = 1.0,
         # use_amp: bool = False,
         # evaluation options
-        eval_ks_ranks: List[int, ...] = (1, 2, 3, 4, 5),
+        eval_ks_ranks: Optional[List[int, ...]] = None,
         relgat_weight: float = 1.0,
         cosine_weight: float = 1.0,
         mse_weight: float = 0.0,
@@ -203,8 +203,10 @@ class RelGATTrainer:
             if eval_every_n_steps is not None and int(eval_every_n_steps) > 0
             else None
         )
+        if eval_ks_ranks is None or not len(eval_ks_ranks):
+            eval_ks_ranks = (1, 2, 3)
         self.eval_ks_ranks = tuple(
-            sorted(set(run_config.get("eval_ks", eval_ks_ranks)))
+            sorted(set(run_config.get("eval_ks_ranks", eval_ks_ranks)))
         )
 
         self._no_improve_steps = 0

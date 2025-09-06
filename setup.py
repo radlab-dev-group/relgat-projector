@@ -49,7 +49,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "relgat-projector-train=relgat_apps.trainers.relgat_projector:main",
+            "relgat-projector-train=relgat_projector_apps.trainers.relgat_projector:main",
         ]
     },
     classifiers=[
