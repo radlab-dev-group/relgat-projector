@@ -451,7 +451,7 @@ class RelGATTrainer:
         Optional[torch.Tensor],
     ]:
         cosine, mse = None, None
-        if self.architecture.project_to_input_size:
+        if not self.architecture.project_to_input_size:
             scores, transformed, dst_vec = self._forward_model_scores(
                 src_ids,
                 rel_ids,
