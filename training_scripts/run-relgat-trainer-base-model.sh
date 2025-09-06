@@ -6,7 +6,7 @@
 # =============================================================================
 # Device: {cuda, cpu, cuda:x}
 DEVICE="cuda"
-CUDA_DEVICES="0"
+CUDA_DEVICES="2"
 MAX_CHECKPOINTS=5
 
 # Ratio of training data
@@ -23,16 +23,16 @@ if [[ "${ARCHITECTURE}" == "small" ]]
 then
   EPOCHS=60
   BATCH_SIZE=64
-  NUM_NEG_TO_POS=8
+  NUM_NEG_TO_POS=12
 
-  GAT_OUT_DIM=256
-  NUM_OF_LAYERS=1
-  NUM_OF_HEADS=16
+  GAT_OUT_DIM=128
+  NUM_OF_LAYERS=2
+  NUM_OF_HEADS=12
 
   LEARNING_RATE=0.00009
 
-  SAVE_N_STEPS=100
-  EVAL_N_STEPS=100
+  SAVE_N_STEPS=500
+  EVAL_N_STEPS=500
   LOG_EVERY_N_STEPS=10
 #elif [[ "${ARCHITECTURE}" == "medium" ]]
 #then
