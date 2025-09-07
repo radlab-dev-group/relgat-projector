@@ -60,6 +60,9 @@ class RelGATTrainer:
         architecture_name: Optional[str] = None,
         base_model_name: Optional[str] = None,
         project_to_input_size: bool = True,
+        projection_layers: int = 1,
+        projection_dropout: float = 0.0,
+        projection_hidden_dim: int = 0,
         # Storage
         max_checkpoints: int = 5,
         out_dir: Optional[str] = None,
@@ -100,6 +103,9 @@ class RelGATTrainer:
             base_model_name=base_model_name,
             run_config=run_config,
             project_to_input_size=project_to_input_size,
+            projection_layers=projection_layers,
+            projection_dropout=projection_dropout,
+            projection_hidden_dim=projection_hidden_dim,
         )
 
         # Training scheduler (total steps, warmup steps, etc.)
@@ -229,6 +235,9 @@ class RelGATTrainer:
             relation_attn_dropout=self.architecture.dropout_rel_attention,
             gat_num_layers=self.architecture.gat_num_layers,
             project_to_input_size=self.architecture.project_to_input_size,
+            projection_layers=self.architecture.projection_layers,
+            projection_dropout=self.architecture.projection_dropout,
+            projection_hidden_dim=self.architecture.projection_hidden_dim,
         ).to(self.device)
 
         # Optimizer
@@ -564,7 +573,7 @@ class RelGATTrainer:
         return pos_score, neg_score, transformed_src, pos_dst_vec
 
     def _split_scores(
-            self, scores: torch.Tensor, pos_examples_in_batch: int
+        self, scores: torch.Tensor, pos_examples_in_batch: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Split flat scores into pos [pos_examples_in_batch] and neg [num_neg]

@@ -26,10 +26,14 @@ then
   NUM_NEG_TO_POS=12
 
   GAT_OUT_DIM=128
-  NUM_OF_LAYERS=2
+  NUM_OF_LAYERS=4
   NUM_OF_HEADS=12
 
-  LEARNING_RATE=0.00009
+#  GAT_OUT_DIM=128
+#  NUM_OF_LAYERS=2
+#  NUM_OF_HEADS=12
+
+  LEARNING_RATE=0.0001
 
   SAVE_N_STEPS=500
   EVAL_N_STEPS=500
@@ -77,12 +81,24 @@ SCORER="distmult"
 # Relation embeddings will be projected to the input embedding size
 # (to disable projection, lets comment the next line)
 PROJECTION_TO_BASE_EMB_SIZE=True
+# Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP
+PROJECTION_LAYERS=3
+# Projection dropout
+PROJECTION_DROPOUT=0.0
+# Dimension of hidden layers in projection (0 to the same as input dim)
+PROJECTION_HIDDEN_DIM=0
 
 # When using projection, multi objective loss function will be used.
 # ... then following weights will be used:
 RELGAT_WEIGHT=1.0
 COSINE_WEIGHT=1.0
 MSE_WEIGHT=0.0
+
+
+# projection_layers
+# projection_dropout
+# projection_hidden_dim
+
 
 # Project to input size embeddings (if option is given).
 # If not set, then frozen-GAT will be learned
@@ -179,6 +195,9 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-projector-train \
   ${USE_AMP:+--use-amp="${USE_AMP}"} \
   ${DISABLE_EDGE_TYPES:+--disable-edge-type-mask="${DISABLE_EDGE_TYPES}"} \
   ${USE_SELF_ADV_NEG:+--use-self-adv-neg} \
+  ${PROJECTION_LAYERS:+--projection-layers="${PROJECTION_LAYERS}"} \
+  ${PROJECTION_DROPOUT:+--projection_dropout="${PROJECTION_DROPOUT}"} \
+  ${PROJECTION_HIDDEN_DIM:+--projection-hidden-dim="${PROJECTION_HIDDEN_DIM}"} \
   ${PROJECTION_TO_BASE_EMB_SIZE:+--project-to-input-size}
 
 

@@ -7,6 +7,7 @@ from typing import Tuple, Optional, List, Dict, Any
 
 from relgat_projector.core.scorer import DistMultScorer, TransEScorer
 from relgat_projector.core.model.relgat_base.layer import RelGATLayer
+from relgat_projector.core.model.relgat_base.projection import ProjectionHead
 
 
 class RelGATModel(nn.Module):
@@ -22,7 +23,10 @@ class RelGATModel(nn.Module):
         dropout: float = 0.2,
         relation_attn_dropout: float = 0.0,
         gat_num_layers: int = 1,
-        project_to_input_size: bool = False,  # project GAT output back to input dim
+        project_to_input_size: bool = False,
+        projection_layers: int = 1,
+        projection_dropout: float = 0.0,
+        projection_hidden_dim: int = 0,
     ):
         super().__init__()
         self.register_buffer("node_emb_fixed", node_emb)  # not a Parameter
@@ -30,7 +34,12 @@ class RelGATModel(nn.Module):
         self.edge_index = edge_index
         self.edge_type = edge_type
         self.gat_num_layers = gat_num_layers
+        self.projection_layers = projection_layers
         self.project_to_input_size = project_to_input_size
+        if project_to_input_size and self.projection_layers < 1:
+            raise ValueError(
+                "projection_layers must be >= 1 when project_to_input_size=True"
+            )
 
         if gat_num_layers == 1:
             self.gat_layer = RelGATLayer(
@@ -66,10 +75,16 @@ class RelGATModel(nn.Module):
         # Optional projection back to the input-embedding dimension
         _scorer_gat_dim = gat_out_dim * gat_heads
         if self.project_to_input_size:
-            self.proj_out = nn.Linear(_scorer_gat_dim, node_emb.size(1), bias=False)
+            self.projection = ProjectionHead(
+                in_dim=_scorer_gat_dim,
+                out_dim=node_emb.size(1),
+                hidden_dim=projection_hidden_dim,
+                num_layers=self.projection_layers,
+                dropout=projection_dropout,
+            )
             _scorer_gat_dim = node_emb.size(1)
         else:
-            self.proj_out = None
+            self.projection = None
 
         self.scorer_type = scorer_type
         if scorer_type.lower() == "distmult":
@@ -244,6 +259,9 @@ class RelGATModel(nn.Module):
             relation_attn_dropout=float(cfg["relation_attn_dropout"]),
             gat_num_layers=int(cfg["gat_num_layers"]),
             project_to_input_size=bool(cfg["project_to_input_size"]),
+            projection_layers=int(cfg["projection_layers"]),
+            projection_dropout=float(cfg["projection_dropout"]),
+            projection_hidden_dim=int(cfg["projection_hidden_dim"]),
         )
 
         state = torch.load(w_path, map_location=map_location)
@@ -265,6 +283,8 @@ class RelGATModel(nn.Module):
                 x = gat(x, self.edge_index, self.edge_type)  # [N, D_gat]
                 if self.act is not None and li < len(self.gat_layers) - 1:
                     x = self.act(x)
+
         if self.project_to_input_size:
-            x = self.proj_out(x)  # [N, D_in]
+            x = self.projection(x)  # [N, D_in]
+
         return x
