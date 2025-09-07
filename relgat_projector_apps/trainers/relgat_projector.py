@@ -135,6 +135,28 @@ def get_args() -> argparse.Namespace:
         "If not set, then frozen-GAT will be learned",
     )
     parser.add_argument(
+        "--projection-layers",
+        dest="projection_layers",
+        type=int,
+        default=3,
+        help="Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP",
+    )
+    parser.add_argument(
+        "--projection_dropout",
+        dest="projection_dropout",
+        type=float,
+        default=ConstantsRelGATTrainer.Default.PROJECTION_DROPOUT,
+        help=f"Projection dropout "
+        f"(default: {ConstantsRelGATTrainer.Default.PROJECTION_DROPOUT})",
+    )
+    parser.add_argument(
+        "--projection-hidden-dim",
+        dest="projection_hidden_dim",
+        type=int,
+        default=3,
+        help="Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP",
+    )
+    parser.add_argument(
         "--dropout",
         dest="dropout",
         type=float,
