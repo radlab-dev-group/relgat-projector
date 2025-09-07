@@ -69,6 +69,9 @@ class RelGATMainTrainerHandler:
             "architecture_name": args.architecture,
             "base_model_name": "relgat",
             "project_to_input_size": args.project_to_input_size,
+            "projection_layers": args.projection_layers,
+            "projection_dropout": args.projection_dropout,
+            "projection_hidden_dim": args.projection_hidden_dim,
             # Larning rate management
             "lr": args.lr,
             "lr_scheduler": args.lr_scheduler,
@@ -124,6 +127,9 @@ class RelGATMainTrainerHandler:
             rel_attn_dropout=run_cfg["dropout_rel_attention"],
             architecture_name=run_cfg["architecture_name"],
             project_to_input_size=run_cfg["project_to_input_size"],
+            projection_layers=run_cfg["projection_layers"],
+            projection_dropout=run_cfg["projection_dropout"],
+            projection_hidden_dim=run_cfg["projection_hidden_dim"],
             # Storage
             out_dir=run_cfg["out_dir"],
             max_checkpoints=run_cfg["max_checkpoints"],

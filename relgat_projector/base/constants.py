@@ -10,6 +10,7 @@ class ConstantsRelGATTrainer:
         GAT_HEADS = 12
         GAT_NUM_LAYERS = 1
         GAT_DROPOUT = 0.25
+        PROJECTION_DROPOUT = 0.25
         GAT_ATT_DROPOUT = 0.0
         GAT_OUT_DIM = 300
 
