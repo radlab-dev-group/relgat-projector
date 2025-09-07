@@ -9,7 +9,7 @@ long_description = (
 
 setup(
     name="relgat-projector-trainer",
-    version="0.2.0",
+    version="0.2.1",
     description="A lightweight trainer for frozen-RelGAT with projection layer.",
     long_description=long_description,
     long_description_content_type="text/markdown",
