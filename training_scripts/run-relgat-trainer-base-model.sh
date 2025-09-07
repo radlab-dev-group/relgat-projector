@@ -6,7 +6,7 @@
 # =============================================================================
 # Device: {cuda, cpu, cuda:x}
 DEVICE="cuda"
-CUDA_DEVICES="2"
+CUDA_DEVICES="0"
 MAX_CHECKPOINTS=5
 
 # Ratio of training data
@@ -26,12 +26,8 @@ then
   NUM_NEG_TO_POS=12
 
   GAT_OUT_DIM=128
-  NUM_OF_LAYERS=4
+  NUM_OF_LAYERS=2
   NUM_OF_HEADS=12
-
-#  GAT_OUT_DIM=128
-#  NUM_OF_LAYERS=2
-#  NUM_OF_HEADS=12
 
   LEARNING_RATE=0.0001
 
@@ -82,7 +78,7 @@ SCORER="distmult"
 # (to disable projection, lets comment the next line)
 PROJECTION_TO_BASE_EMB_SIZE=True
 # Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP
-PROJECTION_LAYERS=3
+PROJECTION_LAYERS=4
 # Projection dropout
 PROJECTION_DROPOUT=0.0
 # Dimension of hidden layers in projection (0 to the same as input dim)
@@ -91,14 +87,12 @@ PROJECTION_HIDDEN_DIM=0
 # When using projection, multi objective loss function will be used.
 # ... then following weights will be used:
 RELGAT_WEIGHT=1.0
-COSINE_WEIGHT=1.0
+# Weigh for positive cosine
+COSINE_WEIGHT_POS=1.0
+# Weigh for negative cosine
+COSINE_WEIGHT_NEG=1.0
+# Weigh for mean square error
 MSE_WEIGHT=0.0
-
-
-# projection_layers
-# projection_dropout
-# projection_hidden_dim
-
 
 # Project to input size embeddings (if option is given).
 # If not set, then frozen-GAT will be learned
@@ -187,7 +181,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-projector-train \
   --save-every-n-steps="${SAVE_N_STEPS}" \
   --max-checkpoints="${MAX_CHECKPOINTS}" \
   --relgat-weight="${RELGAT_WEIGHT}" \
-  --cosine-weight="${COSINE_WEIGHT}" \
+  --pos-cosine-weight="${COSINE_WEIGHT_POS}" \
+  --neg-cosine-weight="${COSINE_WEIGHT_NEG}" \
   --mse-weight="${MSE_WEIGHT}" \
   ${EVAL_N_STEPS:+--eval-every-n-steps="${EVAL_N_STEPS}"} \
   ${WARMUP_STEPS:+--warmup-steps="${WARMUP_STEPS}"} \

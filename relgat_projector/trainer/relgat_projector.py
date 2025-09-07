@@ -12,7 +12,8 @@ from relgat_projector.dataset.relgat_dataset import RelGATDataset
 from relgat_projector.handlers.storage import RelGATStorage
 
 from relgat_projector.core.eval import RelgatEval
-from relgat_projector.core.loss import RelGATLoss, MultiObjectiveRelLoss
+from relgat_projector.core.loss.relgat_loss import RelGATLoss
+from relgat_projector.core.loss.multi_objective_loss import MultiObjectiveRelLoss
 from relgat_projector.core.lr import TrainingScheduler
 from relgat_projector.core.model.relgat_base.model import RelGATModel
 from relgat_projector.core.architecture.constructor import (
@@ -83,7 +84,8 @@ class RelGATTrainer:
         # evaluation options
         eval_ks_ranks: Optional[List] = None,
         relgat_weight: float = 1.0,
-        cosine_weight: float = 1.0,
+        pos_cosine_weight: float = 1.0,
+        neg_cosine_weight: float = 1.0,
         mse_weight: float = 0.0,
     ):
         # Experiments reproduction (seed)
@@ -169,7 +171,8 @@ class RelGATTrainer:
             self.multi_loss = MultiObjectiveRelLoss(
                 relgat_loss=self.relgat_loss,
                 relgat_weight=relgat_weight,
-                cosine_weight=cosine_weight,
+                pos_cosine_weight=pos_cosine_weight,
+                neg_cosine_weight=neg_cosine_weight,
                 mse_weight=mse_weight,
                 run_config=run_config,
             )
@@ -259,7 +262,8 @@ class RelGATTrainer:
         n_examples = 0
         total_loss = 0.0
         total_pos = 0
-        total_cos = 0.0
+        total_cos_pos = 0.0
+        total_cos_neg = 0.0
         total_mse = 0.0
 
         with torch.no_grad():
@@ -268,17 +272,20 @@ class RelGATTrainer:
             ):
                 pos, *negs = zip(*batch)
                 pos_examples_in_batch = len(pos)
+                neg_examples_in_batch = len(negs)
                 n_examples += pos_examples_in_batch
 
                 src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
                     pos, negs, device=self.device
                 )
-                pos_score, neg_score, batch_loss, mse, cosine = self._calculate_loss(
-                    src_ids=src_ids,
-                    rel_ids=rel_ids,
-                    dst_ids=dst_ids,
-                    pos_examples_in_batch=pos_examples_in_batch,
-                    phase="eval",
+                pos_score, neg_score, batch_loss, mse, cosine_pos, cosine_neg = (
+                    self._calculate_loss(
+                        src_ids=src_ids,
+                        rel_ids=rel_ids,
+                        dst_ids=dst_ids,
+                        pos_examples_in_batch=pos_examples_in_batch,
+                        phase="eval",
+                    )
                 )
 
                 total_loss += batch_loss.item() * pos_examples_in_batch
@@ -306,9 +313,13 @@ class RelGATTrainer:
                     ),
                 }
 
-                if cosine is not None:
-                    total_cos += cosine * pos_examples_in_batch
-                    metrics["eval/cosine_mean_batch"] = cosine
+                if cosine_pos is not None:
+                    total_cos_pos += cosine_pos * pos_examples_in_batch
+                    metrics["eval/cosine_mean_batch_pos"] = cosine_pos
+
+                if cosine_neg is not None:
+                    total_cos_neg += cosine_neg * pos_examples_in_batch
+                    metrics["eval/cosine_mean_batch_neg"] = cosine_neg
 
                 if mse is not None:
                     total_mse += mse * pos_examples_in_batch
@@ -323,14 +334,26 @@ class RelGATTrainer:
         avg_mrr = total_mrr / n_examples
         avg_hits = {k: total_hits[k] / n_examples for k in ks}
         avg_eval_loss = total_loss / max(1, total_pos)
-        avg_cosine = None
-        if total_cos > 0.0:
-            avg_cosine = total_cos / max(1, total_pos)
+        avg_cosine_pos = None
+        if total_cos_pos > 0.0:
+            avg_cosine_pos = total_cos_pos / max(1, total_pos)
+
+        avg_cosine_neg = None
+        if total_cos_neg > 0.0:
+            avg_cosine_neg = total_cos_neg / max(1, total_pos)
+
         avg_mse = None
         if total_mse > 0.0:
             avg_mse = total_mse / max(1, total_pos)
 
-        return avg_mrr, avg_hits, avg_eval_loss, avg_cosine, avg_mse
+        return (
+            avg_mrr,
+            avg_hits,
+            avg_eval_loss,
+            avg_cosine_pos,
+            avg_cosine_neg,
+            avg_mse,
+        )
 
     def train(self, epochs: int):
         # Prepare the number of total steps, warmup steps and learning scheduler
@@ -393,12 +416,14 @@ class RelGATTrainer:
                 pos, negs, device=self.device
             )
 
-            pos_score, neg_score, loss, mse, cosine = self._calculate_loss(
-                src_ids=src_ids,
-                rel_ids=rel_ids,
-                dst_ids=dst_ids,
-                pos_examples_in_batch=pos_examples_in_batch,
-                phase="train",
+            pos_score, neg_score, loss, mse, cosine_pos, cosine_neg = (
+                self._calculate_loss(
+                    src_ids=src_ids,
+                    rel_ids=rel_ids,
+                    dst_ids=dst_ids,
+                    pos_examples_in_batch=pos_examples_in_batch,
+                    phase="train",
+                )
             )
             if self._log_non_finite_loss_if_needed(loss=loss):
                 continue
@@ -439,7 +464,8 @@ class RelGATTrainer:
                 pos_score=pos_score,
                 neg_score=neg_score,
                 pos_examples_in_batch=pos_examples_in_batch,
-                cosine=cosine,
+                cosine_pos=cosine_pos,
+                cosine_neg=cosine_neg,
                 mse=mse,
             )
 
@@ -458,8 +484,9 @@ class RelGATTrainer:
         torch.Tensor,
         Optional[torch.Tensor],
         Optional[torch.Tensor],
+        Optional[torch.Tensor],
     ]:
-        cosine, mse = None, None
+        cosine_pos, cosine_neg, mse = None, None, None
         if not self.architecture.project_to_input_size:
             scores, transformed, dst_vec = self._forward_model_scores(
                 src_ids,
@@ -473,28 +500,36 @@ class RelGATTrainer:
                 pos_score=pos_score, neg_score=neg_score
             )
         else:
-            pos_score, neg_score, transformed_src, pos_dst_vec = (
-                self._forward_scores_model_scores_transform(
-                    src_ids=src_ids,
-                    rel_ids=rel_ids,
-                    dst_ids=dst_ids,
-                    pos_examples_in_batch=pos_examples_in_batch,
-                )
+            (
+                pos_score,
+                neg_score,
+                transformed_src,
+                pos_dst_vec,
+                neg_dst_vec_transformed,
+            ) = self._forward_scores_model_scores_transform(
+                src_ids=src_ids,
+                rel_ids=rel_ids,
+                dst_ids=dst_ids,
+                pos_examples_in_batch=pos_examples_in_batch,
             )
             loss = self.multi_loss(
                 pos_score=pos_score,
                 neg_score=neg_score,
                 transformed_src=transformed_src,
                 dst_vec=pos_dst_vec,
+                neg_dst_vec_transformed=neg_dst_vec_transformed,
             )
             # Reconstruction for logging
-            cosine = RelgatEval.batch_cosine_similarity(
+            cosine_pos = RelgatEval.batch_cosine_similarity(
                 transformed_src.detach(), pos_dst_vec.detach()
+            )
+            cosine_neg = 1.0 - RelgatEval.batch_cosine_similarity(
+                transformed_src.detach(), neg_dst_vec_transformed.detach()
             )
             mse = RelgatEval.batch_mse(
                 transformed_src.detach(), pos_dst_vec.detach()
             )
-        return pos_score, neg_score, loss, mse, cosine
+        return pos_score, neg_score, loss, mse, cosine_pos, cosine_neg
 
     def _forward_model_scores(
         self,
@@ -531,7 +566,13 @@ class RelGATTrainer:
         rel_ids: torch.Tensor,
         dst_ids: torch.Tensor,
         pos_examples_in_batch: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+    ]:
         """
         Single GAT-step-based calculation:
         - x = model.compute_node_repr()  (1x GAT + projekcja)
@@ -542,18 +583,16 @@ class RelGATTrainer:
         x = self.model.single_gat_step()  # [N, D_sc]
 
         # Positives
-        pos_src_idx = src_ids[:pos_examples_in_batch]
-        pos_dst_idx = dst_ids[:pos_examples_in_batch]
         pos_rel_ids = rel_ids[:pos_examples_in_batch]
-
-        pos_src_vec = x[pos_src_idx]  # [B, D]
-        pos_dst_vec = x[pos_dst_idx]  # [B, D]
+        pos_src_vec = x[src_ids[:pos_examples_in_batch]]  # [B, D]
+        pos_dst_vec = x[dst_ids[:pos_examples_in_batch]]  # [B, D]
         pos_score = self.model.scorer(pos_src_vec, pos_rel_ids, pos_dst_vec)  # [B]
         transformed_src = self.model.scorer.transform(
             pos_src_vec, pos_rel_ids
         )  # [B, D]
 
         # Negatives
+        neg_dst_vec_ret = None
         if self.dataset.num_neg > 0:
             neg_src_vec = x[src_ids[pos_examples_in_batch:]]  # [B*K, D]
             neg_dst_vec = x[dst_ids[pos_examples_in_batch:]]  # [B*K, D]
@@ -564,13 +603,31 @@ class RelGATTrainer:
             neg_score = neg_scores_flat.view(
                 pos_examples_in_batch, self.dataset.num_neg
             )  # [B, K]
+            # neg_dst_vec_transformed_flat = self.model.scorer.transform(
+            #     neg_dst_vec, neg_rel
+            # )  # [B*K, D]
+            neg_dst_vec_ret = (
+                neg_dst_vec.view(
+                    pos_examples_in_batch,
+                    self.dataset.num_neg,
+                    transformed_src.shape[1],
+                )  # [B, K, D]
+                .permute(1, 0, 2)  # [K, B, D]
+                .contiguous()
+            )
         else:
             neg_score = pos_score.new_zeros((pos_examples_in_batch, 0))
 
         # Sanitization (NaN/Inf)
         pos_score = torch.nan_to_num(pos_score, nan=0.0, neginf=-1e9, posinf=1e9)
         neg_score = torch.nan_to_num(neg_score, nan=0.0, neginf=-1e9, posinf=1e9)
-        return pos_score, neg_score, transformed_src, pos_dst_vec
+        return (
+            pos_score,
+            neg_score,
+            transformed_src,
+            pos_dst_vec,
+            neg_dst_vec_ret,
+        )
 
     def _split_scores(
         self, scores: torch.Tensor, pos_examples_in_batch: int
@@ -600,7 +657,8 @@ class RelGATTrainer:
         mrr: float,
         hits: Dict[int, float],
         eval_loss: float,
-        avg_cosine: Optional[float] = None,
+        avg_cosine_pos: Optional[float] = None,
+        avg_cosine_neg: Optional[float] = None,
         avg_mse: Optional[float] = None,
     ) -> None:
         metrics = {
@@ -608,14 +666,17 @@ class RelGATTrainer:
             "eval/loss": eval_loss,
             "eval/mrr": mrr,
         }
-        for ks in hits.keys():
-            metrics[f"eval/hits@{ks}"] = hits.get(ks, 0.0)
+        if avg_cosine_pos is not None:
+            metrics["eval/cosine_pos"] = avg_cosine_pos
 
-        if avg_cosine is not None:
-            metrics["eval/cosine"] = avg_cosine
+        if avg_cosine_neg is not None:
+            metrics["eval/cosine_neg"] = avg_cosine_neg
 
         if avg_mse is not None:
             metrics["eval/mse"] = avg_mse
+
+        for ks in hits.keys():
+            metrics[f"eval/hits@{ks}"] = hits.get(ks, 0.0)
 
         self.log_adapter.log_metrics(metrics=metrics, step=self.global_step)
 
@@ -663,18 +724,19 @@ class RelGATTrainer:
         Run evaluation, log once, update the best/early-stop.
         Returns True if training should stop.
         """
-        avg_mrr, avg_hits, avg_eval_loss, avg_cosine, avg_mse = self.evaluate(
-            ks=self.eval_ks_ranks
+        avg_mrr, avg_hits, avg_eval_loss, avg_cosine_pos, avg_cosine_neg, avg_mse = (
+            self.evaluate(ks=self.eval_ks_ranks)
         )
         self._print_and_log_eval(
             epoch=epoch,
             mrr=avg_mrr,
             hits=avg_hits,
             eval_loss=avg_eval_loss,
-            avg_cosine=avg_cosine,
+            avg_cosine_pos=avg_cosine_pos,
+            avg_cosine_neg=avg_cosine_neg,
             avg_mse=avg_mse,
         )
-        return self._on_eval_end(avg_mrr, avg_cosine)
+        return self._on_eval_end(avg_mrr, avg_cosine_pos)
 
     def _log_non_finite_loss_if_needed(self, loss):
         if not torch.isfinite(loss):
@@ -695,7 +757,8 @@ class RelGATTrainer:
         neg_score,
         pos_examples_in_batch: int,
         mse: Optional[float] = None,
-        cosine: Optional[float] = None,
+        cosine_pos: Optional[float] = None,
+        cosine_neg: Optional[float] = None,
     ):
         if self.global_step % self.log_adapter.log_every_n_steps != 0:
             return running_loss, running_examples
@@ -744,10 +807,12 @@ class RelGATTrainer:
                 neg_score.detach().mean().item() if neg_score.numel() > 0 else 0.0
             ),
         }
+
         # Multi loss
         if self.architecture.project_to_input_size:
-            metrics["train/cosine"] = float(cosine)
-            metrics["train/mse"] = float(mse)
+            metrics["train/cosine_pos"] = cosine_pos
+            metrics["train/cosine_neg"] = cosine_neg
+            metrics["train/mse"] = mse
 
         # Hits@k
         for k in self.eval_ks_ranks:

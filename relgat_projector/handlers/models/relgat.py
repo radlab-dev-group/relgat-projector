@@ -94,7 +94,8 @@ class RelGATMainTrainerHandler:
             "grad_clip_norm": args.grad_clip_norm,
             "eval_ks_ranks": [i for i in range(1, args.num_neg + 1)],
             "relgat_weight": args.relgat_weight,
-            "cosine_weight": args.cosine_weight,
+            "pos_cosine_weight": args.pos_cosine_weight,
+            "neg_cosine_weight": args.neg_cosine_weight,
             "mse_weight": args.mse_weight,
         }
 
@@ -150,7 +151,8 @@ class RelGATMainTrainerHandler:
             # Evaluation
             eval_ks_ranks=run_cfg["eval_ks_ranks"],
             relgat_weight=run_cfg["relgat_weight"],
-            cosine_weight=run_cfg["cosine_weight"],
+            pos_cosine_weight=run_cfg["pos_cosine_weight"],
+            neg_cosine_weight=run_cfg["neg_cosine_weight"],
             mse_weight=run_cfg["mse_weight"],
         )
         return trainer
