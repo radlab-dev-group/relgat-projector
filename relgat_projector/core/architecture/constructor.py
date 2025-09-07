@@ -13,6 +13,9 @@ class ModelArchitectureConstructor:
         architecture_name: Optional[str],
         base_model_name: Optional[str],
         project_to_input_size: bool,
+        projection_layers: int,
+        projection_dropout: float,
+        projection_hidden_dim: int,
         run_config: Dict[str, Any],
     ):
         self.gat_out_dim = int(run_config.get("gat_out_dim", gat_out_dim))
@@ -26,9 +29,18 @@ class ModelArchitectureConstructor:
         self.architecture_name = architecture_name
         self.base_model_name = base_model_name
 
-        self.project_to_input_size = run_config.get("project_to_input")
-        if self.project_to_input_size is None:
-            self.project_to_input_size = project_to_input_size
+        self.project_to_input_size = run_config.get(
+            "project_to_input", project_to_input_size
+        )
+        self.projection_layers = run_config.get(
+            "projection_layers", projection_layers
+        )
+        self.projection_dropout = run_config.get(
+            "projection_dropout", projection_dropout
+        )
+        self.projection_hidden_dim = run_config.get(
+            "projection_hidden_dim", projection_hidden_dim
+        )
 
         if self.architecture_name is not None:
             self.__check_architecture()
