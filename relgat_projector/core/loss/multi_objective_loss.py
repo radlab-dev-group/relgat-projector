@@ -69,7 +69,7 @@ class MultiObjectiveRelLoss:
         neg_score: torch.Tensor,
         transformed_src: torch.Tensor,  # f_r(A)
         dst_vec: torch.Tensor,  # B
-        neg_dst_vec_transformed: torch.Tensor,  # [B NumNeg]
+        neg_dst_vec: torch.Tensor,  # [B NumNeg]
     ) -> torch.Tensor:
         parts = []
         if self.ranking_weight != 0.0:
@@ -88,7 +88,7 @@ class MultiObjectiveRelLoss:
                 * (
                     1.0
                     - self.cosine_reconstruction_loss(
-                        neg_dst_vec_transformed, dst_vec
+                        transformed_src, neg_dst_vec
                     )
                 )
             )
