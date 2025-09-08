@@ -505,7 +505,7 @@ class RelGATTrainer:
                 neg_score,
                 transformed_src,
                 pos_dst_vec,
-                neg_dst_vec_transformed,
+                neg_dst_vec,
             ) = self._forward_scores_model_scores_transform(
                 src_ids=src_ids,
                 rel_ids=rel_ids,
@@ -517,14 +517,14 @@ class RelGATTrainer:
                 neg_score=neg_score,
                 transformed_src=transformed_src,
                 dst_vec=pos_dst_vec,
-                neg_dst_vec_transformed=neg_dst_vec_transformed,
+                neg_dst_vec=neg_dst_vec,
             )
             # Reconstruction for logging
             cosine_pos = RelgatEval.batch_cosine_similarity(
                 transformed_src.detach(), pos_dst_vec.detach()
             )
             cosine_neg = 1.0 - RelgatEval.batch_cosine_similarity(
-                transformed_src.detach(), neg_dst_vec_transformed.detach()
+                transformed_src.detach(), neg_dst_vec.detach()
             )
             mse = RelgatEval.batch_mse(
                 transformed_src.detach(), pos_dst_vec.detach()
