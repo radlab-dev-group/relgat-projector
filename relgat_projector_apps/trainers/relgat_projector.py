@@ -316,7 +316,18 @@ def get_args() -> argparse.Namespace:
         "--relgat-weight", dest="relgat_weight", type=float, default=1.0
     )
     parser.add_argument(
-        "--cosine-weight", dest="cosine_weight", type=float, default=1.0
+        "--pos-cosine-weight",
+        dest="pos_cosine_weight",
+        type=float,
+        default=1.0,
+        help="Weight for positive cosine loss (default: 1.0)",
+    )
+    parser.add_argument(
+        "--neg-cosine-weight",
+        dest="neg_cosine_weight",
+        type=float,
+        default=1.0,
+        help="Weight for negative cosine loss (default: 1.0)",
     )
     parser.add_argument("--mse-weight", dest="mse_weight", type=float, default=0.0)
 
