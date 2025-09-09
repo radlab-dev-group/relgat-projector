@@ -35,20 +35,3 @@ class RelgatEval:
         mrr = (1.0 / torch.clamp(ranks, min=1.0)).mean().item()
         hits = {k: (ranks <= float(k)).to(pos_s.dtype).mean().item() for k in ks}
         return mrr, hits
-
-    @staticmethod
-    def batch_cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
-        """
-        Zwraca średnią cosine similarity dla par (a_i, b_i).
-        """
-        a_n = torch.nn.functional.normalize(a, p=2, dim=-1)
-        b_n = torch.nn.functional.normalize(b, p=2, dim=-1)
-        cos = (a_n * b_n).sum(dim=-1)  # [B]
-        return cos.mean().item()
-
-    @staticmethod
-    def batch_mse(a: torch.Tensor, b: torch.Tensor) -> float:
-        """
-        Zwraca średni MSE dla par (a_i, b_i).
-        """
-        return torch.nn.functional.mse_loss(a, b).item()
