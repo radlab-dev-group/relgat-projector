@@ -4,20 +4,20 @@ import torch
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
 
-from relgat_projector.core.loss.cosine import CosineLoss
-from relgat_projector.core.loss.mse import MSELoss
 from relgat_projector.utils.random_seed import RandomSeed
 from relgat_projector.utils.logging_adapter import LoggerAdapter
 
+from relgat_projector.handlers.storage import RelGATStorage
 from relgat_projector.base.constants import ConstantsRelGATTrainer
 from relgat_projector.dataset.relgat_dataset import RelGATDataset
-from relgat_projector.handlers.storage import RelGATStorage
 
 from relgat_projector.core.eval import RelgatEval
+from relgat_projector.core.lr import TrainingScheduler
+from relgat_projector.core.loss.mse import MSELoss
+from relgat_projector.core.loss.cosine import CosineLoss
 from relgat_projector.core.loss.relgat_loss import RelGATLoss
 from relgat_projector.core.loss.multi_objective_loss import MultiObjectiveRelLoss
-from relgat_projector.core.lr import TrainingScheduler
-from relgat_projector.core.model.relgat_base.model import RelGATModel
+from relgat_projector.core.model.model import RelGATModel
 from relgat_projector.core.architecture.constructor import (
     ModelArchitectureConstructor,
 )
