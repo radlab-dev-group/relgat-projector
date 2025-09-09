@@ -528,13 +528,21 @@ class RelGATTrainer:
                 neg_dst_vec=neg_dst_vec,
             )
             # Reconstruction for logging
-            cosine_pos = CosineLoss.calculate(
-                transformed_src.detach(), pos_dst_vec.detach()
-            ).item()
-            cosine_neg = CosineLoss.calculate(
-                transformed_src.detach(), neg_dst_vec.detach()
-            ).item()
-            mse = MSELoss.calculate(transformed_src.detach(), pos_dst_vec.detach())
+            cosine_pos = (
+                CosineLoss.calculate(transformed_src.detach(), pos_dst_vec.detach())
+                .detach()
+                .item()
+            )
+            cosine_neg = (
+                CosineLoss.calculate(transformed_src.detach(), neg_dst_vec.detach())
+                .detach()
+                .item()
+            )
+            mse = (
+                MSELoss.calculate(transformed_src.detach(), pos_dst_vec.detach())
+                .detach()
+                .item()
+            )
         return pos_score, neg_score, loss, mse, cosine_pos, cosine_neg
 
     def _forward_model_scores(
