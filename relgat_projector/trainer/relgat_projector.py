@@ -447,16 +447,6 @@ class RelGATTrainer:
             if self.training_scheduler.scheduler is not None:
                 self.training_scheduler.scheduler.step()
 
-            # TransE stabilization of scale:
-            #   -> normalization of relation vectors after each step.
-            # TODO: Normalization have to be done within scorer
-            if getattr(self, "scorer_type", "").lower() == "transe":
-                with torch.no_grad():
-                    w = self.model.scorer.rel_emb.weight
-                    self.model.scorer.rel_emb.weight.copy_(
-                        torch.nn.functional.normalize(w, p=2, dim=-1)
-                    )
-
             loss_item = loss.item()
             epoch_loss += loss_item * pos_examples_in_batch
             running_loss += loss_item * pos_examples_in_batch

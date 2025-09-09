@@ -22,17 +22,17 @@ ARCHITECTURE="small"
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
   EPOCHS=60
-  BATCH_SIZE=64
-  NUM_NEG_TO_POS=12
+  BATCH_SIZE=128
+  NUM_NEG_TO_POS=32
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
-  NUM_OF_HEADS=12
+  NUM_OF_HEADS=24
 
   LEARNING_RATE=0.0001
 
-  SAVE_N_STEPS=500
-  EVAL_N_STEPS=500
+  SAVE_N_STEPS=300
+  EVAL_N_STEPS=150
   LOG_EVERY_N_STEPS=10
 #elif [[ "${ARCHITECTURE}" == "medium" ]]
 #then
@@ -78,7 +78,7 @@ SCORER="distmult"
 # (to disable projection, lets comment the next line)
 PROJECTION_TO_BASE_EMB_SIZE=True
 # Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP
-PROJECTION_LAYERS=4
+PROJECTION_LAYERS=3
 # Projection dropout
 PROJECTION_DROPOUT=0.0
 # Dimension of hidden layers in projection (0 to the same as input dim)
