@@ -10,7 +10,7 @@ CUDA_DEVICES="0"
 MAX_CHECKPOINTS=5
 
 # Ratio of training data
-TRAIN_EVAL_DATASET_RATIO="0.90"
+TRAIN_EVAL_DATASET_RATIO="0.80"
 
 # Which architecture will be trained {small, medium, medium}
 ARCHITECTURE="small"
@@ -29,7 +29,7 @@ then
   NUM_OF_LAYERS=2
   NUM_OF_HEADS=24
 
-  LEARNING_RATE=0.0001
+  LEARNING_RATE=0.00001
 
   SAVE_N_STEPS=300
   EVAL_N_STEPS=150
@@ -78,7 +78,7 @@ SCORER="distmult"
 # (to disable projection, lets comment the next line)
 PROJECTION_TO_BASE_EMB_SIZE=True
 # Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP
-PROJECTION_LAYERS=3
+PROJECTION_LAYERS=2
 # Projection dropout
 PROJECTION_DROPOUT=0.0
 # Dimension of hidden layers in projection (0 to the same as input dim)
