@@ -21,7 +21,7 @@ class LoggerAdapter:
         log_to_wandb: bool = False,
         log_to_console: bool = True,
     ):
-        self.run_name = run_name
+        self.run_name = run_name if run_name is not None else ""
         self.log_to_wandb = log_to_wandb
         self.log_to_console = log_to_console
 
