@@ -5,9 +5,9 @@ import torch.nn as nn
 
 from typing import Tuple, Optional, List, Dict, Any
 
+from relgat_projector.core.model.layer import RelGATLayer
+from relgat_projector.core.model.projection import ProjectionHead
 from relgat_projector.core.scorer import DistMultScorer, TransEScorer
-from relgat_projector.core.model.relgat_base.layer import RelGATLayer
-from relgat_projector.core.model.relgat_base.projection import ProjectionHead
 
 
 class RelGATModel(nn.Module):
