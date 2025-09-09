@@ -32,13 +32,13 @@ class RelGATTrainer:
     def __init__(
         self,
         # Whole config -- with prior higher than args
-        run_config: Dict,
-        wandb_config: Optional[Any],
-        run_name: Optional[str],
+        run_config: Optional[Dict] = None,
+        wandb_config: Optional[Any] = None,
+        run_name: Optional[str] = None,
         # Dataset
-        node2emb: Dict[int, torch.Tensor],
-        rel2idx: Dict[str, int],
-        edge_index_raw: List[Tuple[int, int, str]],
+        node2emb: Optional[Dict[int, torch.Tensor]] = None,
+        rel2idx: Optional[Dict[str, int]] = None,
+        edge_index_raw: Optional[List[Tuple[int, int, str]]] = None,
         train_batch_size: int = 256,
         eval_batch_size: int = 256,
         # Learning environment
@@ -90,6 +90,9 @@ class RelGATTrainer:
         neg_cosine_weight: float = 1.0,
         mse_weight: float = 0.0,
     ):
+        if run_config is None:
+            run_config = {}
+
         # Experiments reproduction (seed)
         self.repr_training = RandomSeed(
             seed=seed, run_config=run_config, auto_set_seed=True
@@ -121,18 +124,24 @@ class RelGATTrainer:
             run_config=run_config,
         )
 
-        # RelGAT dataset
-        self.dataset = RelGATDataset(
-            device=device,
-            node2emb=node2emb,
-            rel2idx=rel2idx,
-            edge_index_raw=edge_index_raw,
-            train_ratio=train_ratio,
-            num_neg=num_neg,
-            train_batch_size=train_batch_size,
-            eval_batch_size=eval_batch_size,
-            run_config=run_config,
-        )
+        self.dataset = None
+        if (
+            node2emb is not None
+            and rel2idx is not None
+            and edge_index_raw is not None
+        ):
+            # RelGAT dataset
+            self.dataset = RelGATDataset(
+                device=device,
+                node2emb=node2emb,
+                rel2idx=rel2idx,
+                edge_index_raw=edge_index_raw,
+                train_ratio=train_ratio,
+                num_neg=num_neg,
+                train_batch_size=train_batch_size,
+                eval_batch_size=eval_batch_size,
+                run_config=run_config,
+            )
         # Storage and training handling (checkpoints)
         self.storage = RelGATStorage(
             out_dir=out_dir,
@@ -271,6 +280,9 @@ class RelGATTrainer:
         total_cos_neg = 0.0
         total_mse = 0.0
 
+        if self.dataset is None:
+            raise RuntimeError("Dataset is not loaded!")
+
         with torch.no_grad():
             for batch in tqdm(
                 self.dataset.eval_loader, desc="Evaluation", leave=False
@@ -361,6 +373,9 @@ class RelGATTrainer:
         )
 
     def train(self, epochs: int):
+        if self.dataset is None:
+            raise RuntimeError("Dataset is not loaded!")
+
         # Prepare the number of total steps, warmup steps and learning scheduler
         self.training_scheduler.prepare(
             epochs=epochs,
@@ -406,6 +421,9 @@ class RelGATTrainer:
         running_loss: float,
         running_examples: int,
     ):
+        if self.dataset is None:
+            raise RuntimeError("Dataset is not loaded!")
+
         self.model.train()
 
         for step_in_epoch, batch in enumerate(
