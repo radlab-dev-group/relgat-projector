@@ -211,8 +211,11 @@ class RelGATTrainer:
         self.disable_edge_type_mask = bool(
             run_config.get("disable_edge_type_mask", disable_edge_type_mask)
         )
-        # Best mrr
-        self.best_metric_value = -float("inf")
+        # Best metric
+        self.upper_is_better = False
+        self.best_metric_value = (
+            -float("inf") if self.upper_is_better else float("inf")
+        )
 
         # Logging steps
         self.global_step = 0
@@ -485,7 +488,7 @@ class RelGATTrainer:
                 mse=mse,
             )
 
-            if self._eval_step_if_needed_and_end_training(
+            if self._eval_step_if_needed_and_stop_training_after_batch(
                 epoch=epoch, epoch_loss=epoch_loss
             ):
                 break
@@ -711,7 +714,11 @@ class RelGATTrainer:
         if cosine is not None:
             metric_value = cosine
 
-        improved = metric_value > self.best_metric_value
+        if self.upper_is_better:
+            improved = metric_value > self.best_metric_value
+        else:
+            improved = metric_value < self.best_metric_value
+
         if improved:
             self.best_metric_value = metric_value
             if (
@@ -845,7 +852,9 @@ class RelGATTrainer:
 
         return 0.0, 1
 
-    def _eval_step_if_needed_and_end_training(self, epoch: int, epoch_loss: float):
+    def _eval_step_if_needed_and_stop_training_after_batch(
+        self, epoch: int, epoch_loss: float
+    ):
         if (
             self.eval_every_n_steps is None
             or self.global_step % self.eval_every_n_steps != 0
