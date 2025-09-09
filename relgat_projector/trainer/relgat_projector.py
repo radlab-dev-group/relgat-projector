@@ -4,6 +4,8 @@ import torch
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
 
+from relgat_projector.core.loss.cosine import CosineLoss
+from relgat_projector.core.loss.mse import MSELoss
 from relgat_projector.utils.random_seed import RandomSeed
 from relgat_projector.utils.logging_adapter import LoggerAdapter
 
@@ -275,7 +277,7 @@ class RelGATTrainer:
             ):
                 pos, *negs = zip(*batch)
                 pos_examples_in_batch = len(pos)
-                neg_examples_in_batch = len(negs)
+                # neg_examples_in_batch = len(negs)
                 n_examples += pos_examples_in_batch
 
                 src_ids, rel_ids, dst_ids = concat_pos_negs_to_tensors(
@@ -526,15 +528,13 @@ class RelGATTrainer:
                 neg_dst_vec=neg_dst_vec,
             )
             # Reconstruction for logging
-            cosine_pos = RelgatEval.batch_cosine_similarity(
+            cosine_pos = CosineLoss.calculate(
                 transformed_src.detach(), pos_dst_vec.detach()
-            )
-            cosine_neg = RelgatEval.batch_cosine_similarity(
+            ).item()
+            cosine_neg = CosineLoss.calculate(
                 transformed_src.detach(), neg_dst_vec.detach()
-            )
-            mse = RelgatEval.batch_mse(
-                transformed_src.detach(), pos_dst_vec.detach()
-            )
+            ).item()
+            mse = MSELoss.calculate(transformed_src.detach(), pos_dst_vec.detach())
         return pos_score, neg_score, loss, mse, cosine_pos, cosine_neg
 
     def _forward_model_scores(
