@@ -206,6 +206,9 @@ class RelGATTrainer:
         # Logging steps
         self.global_step = 0
 
+        # Marker when training will be stopped
+        self.training_should_stop = False
+
         # Eval steps
         self.eval_every_n_steps = (
             int(eval_every_n_steps)
@@ -379,7 +382,10 @@ class RelGATTrainer:
                 running_examples=running_examples,
             )
 
-            if self._eval_if_needed_and_stop_if_needed(
+            if self.training_should_stop:
+                break
+
+            if self._eval_if_needed_and_stop_if_needed_after_epoch(
                 epoch=epoch, epoch_loss=epoch_loss
             ):
                 break
@@ -716,6 +722,7 @@ class RelGATTrainer:
                 "\n  Early‑stopping triggered – no improvement for "
                 f"{self.early_stop_patience} evaluation steps."
             )
+            self.training_should_stop = True
             return True
         return False
 
@@ -872,8 +879,7 @@ class RelGATTrainer:
             ],
         )
 
-    def _eval_if_needed_and_stop_if_needed(self, epoch, epoch_loss):
-        should_stop = False
+    def _eval_if_needed_and_stop_if_needed_after_epoch(self, epoch, epoch_loss):
         if self.eval_every_n_steps is None:
-            should_stop = self._run_eval_and_maybe_early_stop(epoch=epoch)
-        return should_stop
+            self._run_eval_and_maybe_early_stop(epoch=epoch)
+        return self.training_should_stop

@@ -87,9 +87,7 @@ class MultiObjectiveRelLoss:
                 self.neg_cosine_weight
                 * (
                     1.0
-                    - self.cosine_reconstruction_loss(
-                        transformed_src, neg_dst_vec
-                    )
+                    - self.cosine_reconstruction_loss(transformed_src, neg_dst_vec)
                 )
             )
         if self.mse_weight != 0.0:
