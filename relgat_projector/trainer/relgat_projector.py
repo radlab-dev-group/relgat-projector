@@ -529,7 +529,7 @@ class RelGATTrainer:
             cosine_pos = RelgatEval.batch_cosine_similarity(
                 transformed_src.detach(), pos_dst_vec.detach()
             )
-            cosine_neg = 1.0 - RelgatEval.batch_cosine_similarity(
+            cosine_neg = RelgatEval.batch_cosine_similarity(
                 transformed_src.detach(), neg_dst_vec.detach()
             )
             mse = RelgatEval.batch_mse(
