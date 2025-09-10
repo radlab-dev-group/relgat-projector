@@ -22,14 +22,14 @@ ARCHITECTURE="small"
 if [[ "${ARCHITECTURE}" == "small" ]]
 then
   EPOCHS=60
-  BATCH_SIZE=64
+  BATCH_SIZE=128
   NUM_NEG_TO_POS=32
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
-  NUM_OF_HEADS=24
+  NUM_OF_HEADS=16
 
-  LEARNING_RATE=0.0001
+  LEARNING_RATE=0.00002
 
   SAVE_N_STEPS=300
   EVAL_N_STEPS=150
@@ -82,7 +82,7 @@ PROJECTION_LAYERS=2
 # Projection dropout
 PROJECTION_DROPOUT=0.0
 # Dimension of hidden layers in projection (0 to the same as input dim)
-  PROJECTION_HIDDEN_DIM=0
+PROJECTION_HIDDEN_DIM=0
 
 # When using projection, multi objective loss function will be used.
 # ... then following weights will be used:

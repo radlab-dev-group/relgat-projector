@@ -1,7 +1,5 @@
 import torch
 
-import torch.nn.functional as F
-
 from typing import Any, Dict
 
 from relgat_projector.core.loss.cosine import CosineLoss
@@ -56,25 +54,30 @@ class MultiObjectiveRelLoss:
         neg_dst_vec: torch.Tensor,  # [B NumNeg]
     ) -> torch.Tensor:
         parts = []
+        weights = []
         if self.ranking_weight != 0.0:
+            weights.append(self.ranking_weight)
             parts.append(
                 self.ranking_weight * self.relgat_ranking_loss(pos_score, neg_score)
             )
         if self.pos_cosine_weight != 0.0:
+            weights.append(self.pos_cosine_weight)
             parts.append(
                 self.pos_cosine_weight
                 * CosineLoss.calculate(transformed_src, dst_vec)
             )
 
         if self.neg_cosine_weight != 0.0:
+            weights.append(self.neg_cosine_weight)
             parts.append(
                 self.neg_cosine_weight
                 * (1.0 - CosineLoss.calculate(transformed_src, neg_dst_vec))
             )
         if self.mse_weight != 0.0:
+            weights.append(self.mse_weight)
             parts.append(
                 self.mse_weight * MSELoss.calculate(transformed_src, dst_vec)
             )
         if not parts:
             raise ValueError("At least one loss weight must be non-zero.")
-        return torch.stack(parts).sum()
+        return torch.stack(parts).sum() / sum(weights)

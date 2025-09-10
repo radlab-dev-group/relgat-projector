@@ -5,9 +5,9 @@ import torch.nn as nn
 
 from typing import Tuple, Optional, List, Dict, Any
 
+from relgat_projector.core.model.layer import RelGATLayer
+from relgat_projector.core.model.projection import ProjectionHead
 from relgat_projector.core.scorer import DistMultScorer, TransEScorer
-from relgat_projector.core.model.relgat_base.layer import RelGATLayer
-from relgat_projector.core.model.relgat_base.projection import ProjectionHead
 
 
 class RelGATModel(nn.Module):
@@ -90,7 +90,9 @@ class RelGATModel(nn.Module):
         if scorer_type.lower() == "distmult":
             self.scorer = DistMultScorer(num_rel, rel_dim=_scorer_gat_dim)
         elif scorer_type.lower() == "transe":
-            self.scorer = TransEScorer(num_rel, rel_dim=_scorer_gat_dim)
+            self.scorer = TransEScorer(
+                num_rel, rel_dim=_scorer_gat_dim, normalize=True
+            )
         else:
             raise ValueError(f"Unknown scorer_type: {scorer_type}")
 
@@ -216,9 +218,9 @@ class RelGATModel(nn.Module):
     def load_from_pretrained(
         input_dir: str,
         *,
-        node_emb: torch.Tensor,  # [N, D_in]
-        edge_index: torch.Tensor,  # [2, E]
-        edge_type: torch.Tensor,  # [E]
+        node_emb: Optional[torch.Tensor] = None,  # [N, D_in]
+        edge_index: Optional[torch.Tensor] = None,  # [2, E]
+        edge_type: Optional[torch.Tensor] = None,  # [E]
         map_location: str | torch.device | None = None,
     ) -> "RelGATModel":
         """
