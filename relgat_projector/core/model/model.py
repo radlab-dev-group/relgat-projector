@@ -218,9 +218,9 @@ class RelGATModel(nn.Module):
     def load_from_pretrained(
         input_dir: str,
         *,
-        node_emb: torch.Tensor,  # [N, D_in]
-        edge_index: torch.Tensor,  # [2, E]
-        edge_type: torch.Tensor,  # [E]
+        node_emb: Optional[torch.Tensor] = None,  # [N, D_in]
+        edge_index: Optional[torch.Tensor] = None,  # [2, E]
+        edge_type: Optional[torch.Tensor] = None,  # [E]
         map_location: str | torch.device | None = None,
     ) -> "RelGATModel":
         """

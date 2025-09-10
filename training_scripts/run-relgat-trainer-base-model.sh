@@ -27,9 +27,9 @@ then
 
   GAT_OUT_DIM=128
   NUM_OF_LAYERS=2
-  NUM_OF_HEADS=24
+  NUM_OF_HEADS=16
 
-  LEARNING_RATE=0.00001
+  LEARNING_RATE=0.00002
 
   SAVE_N_STEPS=300
   EVAL_N_STEPS=150
@@ -80,7 +80,7 @@ PROJECTION_TO_BASE_EMB_SIZE=True
 # Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP
 PROJECTION_LAYERS=2
 # Projection dropout
-PROJECTION_DROPOUT=0.0
+PROJECTION_DROPOUT=0.1
 # Dimension of hidden layers in projection (0 to the same as input dim)
 PROJECTION_HIDDEN_DIM=0
 
