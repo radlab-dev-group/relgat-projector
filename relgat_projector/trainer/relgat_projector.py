@@ -4,20 +4,20 @@ import torch
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
 
-from relgat_projector.core.loss.cosine import CosineLoss
-from relgat_projector.core.loss.mse import MSELoss
 from relgat_projector.utils.random_seed import RandomSeed
 from relgat_projector.utils.logging_adapter import LoggerAdapter
 
+from relgat_projector.handlers.storage import RelGATStorage
 from relgat_projector.base.constants import ConstantsRelGATTrainer
 from relgat_projector.dataset.relgat_dataset import RelGATDataset
-from relgat_projector.handlers.storage import RelGATStorage
 
 from relgat_projector.core.eval import RelgatEval
+from relgat_projector.core.lr import TrainingScheduler
+from relgat_projector.core.loss.mse import MSELoss
+from relgat_projector.core.loss.cosine import CosineLoss
 from relgat_projector.core.loss.relgat_loss import RelGATLoss
 from relgat_projector.core.loss.multi_objective_loss import MultiObjectiveRelLoss
-from relgat_projector.core.lr import TrainingScheduler
-from relgat_projector.core.model.relgat_base.model import RelGATModel
+from relgat_projector.core.model.model import RelGATModel
 from relgat_projector.core.architecture.constructor import (
     ModelArchitectureConstructor,
 )
@@ -32,13 +32,13 @@ class RelGATTrainer:
     def __init__(
         self,
         # Whole config -- with prior higher than args
-        run_config: Dict,
-        wandb_config: Optional[Any],
-        run_name: Optional[str],
+        run_config: Optional[Dict] = None,
+        wandb_config: Optional[Any] = None,
+        run_name: Optional[str] = None,
         # Dataset
-        node2emb: Dict[int, torch.Tensor],
-        rel2idx: Dict[str, int],
-        edge_index_raw: List[Tuple[int, int, str]],
+        node2emb: Optional[Dict[int, torch.Tensor]] = None,
+        rel2idx: Optional[Dict[str, int]] = None,
+        edge_index_raw: Optional[List[Tuple[int, int, str]]] = None,
         train_batch_size: int = 256,
         eval_batch_size: int = 256,
         # Learning environment
@@ -90,6 +90,9 @@ class RelGATTrainer:
         neg_cosine_weight: float = 1.0,
         mse_weight: float = 0.0,
     ):
+        if run_config is None:
+            run_config = {}
+
         # Experiments reproduction (seed)
         self.repr_training = RandomSeed(
             seed=seed, run_config=run_config, auto_set_seed=True
@@ -121,18 +124,24 @@ class RelGATTrainer:
             run_config=run_config,
         )
 
-        # RelGAT dataset
-        self.dataset = RelGATDataset(
-            device=device,
-            node2emb=node2emb,
-            rel2idx=rel2idx,
-            edge_index_raw=edge_index_raw,
-            train_ratio=train_ratio,
-            num_neg=num_neg,
-            train_batch_size=train_batch_size,
-            eval_batch_size=eval_batch_size,
-            run_config=run_config,
-        )
+        self.dataset = None
+        if (
+            node2emb is not None
+            and rel2idx is not None
+            and edge_index_raw is not None
+        ):
+            # RelGAT dataset
+            self.dataset = RelGATDataset(
+                device=device,
+                node2emb=node2emb,
+                rel2idx=rel2idx,
+                edge_index_raw=edge_index_raw,
+                train_ratio=train_ratio,
+                num_neg=num_neg,
+                train_batch_size=train_batch_size,
+                eval_batch_size=eval_batch_size,
+                run_config=run_config,
+            )
         # Storage and training handling (checkpoints)
         self.storage = RelGATStorage(
             out_dir=out_dir,
@@ -202,8 +211,11 @@ class RelGATTrainer:
         self.disable_edge_type_mask = bool(
             run_config.get("disable_edge_type_mask", disable_edge_type_mask)
         )
-        # Best mrr
-        self.best_metric_value = -float("inf")
+        # Best metric
+        self.upper_is_better = False
+        self.best_metric_value = (
+            -float("inf") if self.upper_is_better else float("inf")
+        )
 
         # Logging steps
         self.global_step = 0
@@ -270,6 +282,9 @@ class RelGATTrainer:
         total_cos_pos = 0.0
         total_cos_neg = 0.0
         total_mse = 0.0
+
+        if self.dataset is None:
+            raise RuntimeError("Dataset is not loaded!")
 
         with torch.no_grad():
             for batch in tqdm(
@@ -361,6 +376,9 @@ class RelGATTrainer:
         )
 
     def train(self, epochs: int):
+        if self.dataset is None:
+            raise RuntimeError("Dataset is not loaded!")
+
         # Prepare the number of total steps, warmup steps and learning scheduler
         self.training_scheduler.prepare(
             epochs=epochs,
@@ -406,6 +424,9 @@ class RelGATTrainer:
         running_loss: float,
         running_examples: int,
     ):
+        if self.dataset is None:
+            raise RuntimeError("Dataset is not loaded!")
+
         self.model.train()
 
         for step_in_epoch, batch in enumerate(
@@ -447,16 +468,6 @@ class RelGATTrainer:
             if self.training_scheduler.scheduler is not None:
                 self.training_scheduler.scheduler.step()
 
-            # TransE stabilization of scale:
-            #   -> normalization of relation vectors after each step.
-            # TODO: Normalization have to be done within scorer
-            if getattr(self, "scorer_type", "").lower() == "transe":
-                with torch.no_grad():
-                    w = self.model.scorer.rel_emb.weight
-                    self.model.scorer.rel_emb.weight.copy_(
-                        torch.nn.functional.normalize(w, p=2, dim=-1)
-                    )
-
             loss_item = loss.item()
             epoch_loss += loss_item * pos_examples_in_batch
             running_loss += loss_item * pos_examples_in_batch
@@ -477,7 +488,7 @@ class RelGATTrainer:
                 mse=mse,
             )
 
-            if self._eval_step_if_needed_and_end_training(
+            if self._eval_step_if_needed_and_stop_training_after_batch(
                 epoch=epoch, epoch_loss=epoch_loss
             ):
                 break
@@ -528,13 +539,21 @@ class RelGATTrainer:
                 neg_dst_vec=neg_dst_vec,
             )
             # Reconstruction for logging
-            cosine_pos = CosineLoss.calculate(
-                transformed_src.detach(), pos_dst_vec.detach()
-            ).item()
-            cosine_neg = CosineLoss.calculate(
-                transformed_src.detach(), neg_dst_vec.detach()
-            ).item()
-            mse = MSELoss.calculate(transformed_src.detach(), pos_dst_vec.detach())
+            cosine_pos = (
+                CosineLoss.calculate(transformed_src.detach(), pos_dst_vec.detach())
+                .detach()
+                .item()
+            )
+            cosine_neg = (
+                CosineLoss.calculate(transformed_src.detach(), neg_dst_vec.detach())
+                .detach()
+                .item()
+            )
+            mse = (
+                MSELoss.calculate(transformed_src.detach(), pos_dst_vec.detach())
+                .detach()
+                .item()
+            )
         return pos_score, neg_score, loss, mse, cosine_pos, cosine_neg
 
     def _forward_model_scores(
@@ -695,7 +714,11 @@ class RelGATTrainer:
         if cosine is not None:
             metric_value = cosine
 
-        improved = metric_value > self.best_metric_value
+        if self.upper_is_better:
+            improved = metric_value > self.best_metric_value
+        else:
+            improved = metric_value < self.best_metric_value
+
         if improved:
             self.best_metric_value = metric_value
             if (
@@ -829,7 +852,9 @@ class RelGATTrainer:
 
         return 0.0, 1
 
-    def _eval_step_if_needed_and_end_training(self, epoch: int, epoch_loss: float):
+    def _eval_step_if_needed_and_stop_training_after_batch(
+        self, epoch: int, epoch_loss: float
+    ):
         if (
             self.eval_every_n_steps is None
             or self.global_step % self.eval_every_n_steps != 0

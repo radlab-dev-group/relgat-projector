@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Optional
-from torch_scatter import scatter_add
+from torch_scatter import scatter_max, scatter_add
 
 
 class RelGATLayer(nn.Module):
@@ -214,11 +214,13 @@ class RelGATLayer(nn.Module):
         src, dst = edge_index
         N = node_emb.size(0)
 
+        # --------------------------------------------------------------
         # 1. Project node vectors for each head
         # proj_src[h] : [E, out_dim]
         proj_src = [lin(node_emb)[src] for lin in self.proj]  # list of length heads
         # proj_dst = [lin(node_emb)[dst] for lin in self.proj]
 
+        # --------------------------------------------------------------
         # 2. Compute un‑normalized attention
         # For head h:  e_ij = (proj_src_h ⊙ a_h[rel]) · 1   (LeakyReLU)
         attn_scores = []
@@ -242,37 +244,61 @@ class RelGATLayer(nn.Module):
         # denom = denom + 1e-16
         # attn = attn / denom[:, dst]  # normalized, [H, E]
 
+        # # 3. Stable softmax over neighbours (per destination)
+        # # Instead of using exp directly,
+        # # we subtract the per-dst maximum to stabilize the softmax.
+        # attn = []
+        # for h in range(self.heads):
+        #     e_h = attn_scores[h]  # [E]
+        #     # max per dst node
+        #     # initialize tensors to -inf and fill the maximum for each dst node
+        #     m = torch.full((N,), float("-inf"), device=e_h.device, dtype=e_h.dtype)
+        #
+        #     # per-dst max update
+        #     m.index_copy_(0, dst, torch.maximum(m[dst], e_h))
+        #
+        #     # gather m for edges
+        #     m_e = m[dst]
+        #
+        #     # stabilization: e' = e - m
+        #     e_shift = e_h - m_e
+        #     w = torch.exp(e_shift)
+        #
+        #     denom = scatter_add(w, dst, dim=0, dim_size=N)  # [N]
+        #     denom = denom.clamp_min(self.STABLE_SOFTMAX_EPS)
+        #
+        #     alpha = w / denom[dst]  # [E]
+        #
+        #     # optional dropout on attention weights (on edges)
+        #     if self.rel_attn_drop.p > 0.0:
+        #         alpha = self.rel_attn_drop(alpha)
+        #
+        #     attn.append(alpha)
+        # --------------------------------------------------------------
         # 3. Stable softmax over neighbours (per destination)
-        # Instead of using exp directly,
-        # we subtract the per-dst maximum to stabilize the softmax.
+        # --------------------------------------------------------------
         attn = []
         for h in range(self.heads):
             e_h = attn_scores[h]  # [E]
-            # max per dst node
-            # initialize tensors to -inf and fill the maximum for each dst node
-            m = torch.full((N,), float("-inf"), device=e_h.device, dtype=e_h.dtype)
-
-            # per-dst max update
-            m.index_copy_(0, dst, torch.maximum(m[dst], e_h))
-
-            # gather m for edges
-            m_e = m[dst]
-
-            # stabilization: e' = e - m
-            e_shift = e_h - m_e
-            w = torch.exp(e_shift)
+            # ---- prawdziwe maksimum per destination node -----------------
+            max_per_dst, _ = scatter_max(e_h, dst, dim=0, dim_size=N)  # [N]
+            max_e = max_per_dst[dst]  # [E] – max dla każdej krawędzi
+            # ---- stabilny soft‑max --------------------------------------
+            e_shift = e_h - max_e
+            w = torch.exp(e_shift)  # nie‑znormalizowane wagi
 
             denom = scatter_add(w, dst, dim=0, dim_size=N)  # [N]
             denom = denom.clamp_min(self.STABLE_SOFTMAX_EPS)
 
-            alpha = w / denom[dst]  # [E]
+            alpha = w / denom[dst]  # [E] – prawidłowe α_ij^h
 
-            # optional dropout on attention weights (on edges)
+            # opcjonalny dropout na wagach uwagi
             if self.rel_attn_drop.p > 0.0:
                 alpha = self.rel_attn_drop(alpha)
 
             attn.append(alpha)
 
+        # --------------------------------------------------------------
         # 4. Message passing
         # Multiply source projection by attention weight
         msgs = [proj_src[h] * attn[h].unsqueeze(-1) for h in range(self.heads)]
@@ -282,6 +308,7 @@ class RelGATLayer(nn.Module):
             scatter_add(msg, dst, dim=0, dim_size=N) for msg in msgs
         ]  # list of [N, out_dim]
 
+        # --------------------------------------------------------------
         # 5. Optional relation bias
         if self.rel_bias is not None:
             # bias per edge, broadcast to destination node after aggregation
