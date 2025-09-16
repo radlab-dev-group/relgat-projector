@@ -18,17 +18,17 @@ negative sampling, LR scheduling, checkpointing, and optional Weights & Biases l
 > **Prerequisite**: `radlab-ml-utils`
 >
 > This project uses the 
-> [radlab-ml-utils](https://github.com/radlab-dev-group/radlab-ml-utils) 
+> [radlab-ml-utils](https://github.com/radlab-dev-group/ml-utils) 
 > library for machine learning utilities 
 > (e.g., experiment/result logging with Weights & Biases/wandb).
 > Install it before working with ML-related parts:
 >
 > ```bash
-> pip install git+https://github.com/radlab-dev-group/radlab-ml-utils.git
+> pip install git+https://github.com/radlab-dev-group/ml-utils.git
 > ```
 >
 > For more options and details, see the library README: 
-> https://github.com/radlab-dev-group/radlab-ml-utils
+> https://github.com/radlab-dev-group/ml-utils
 
 Install from local source:
 ```bash 
@@ -68,8 +68,7 @@ This trainer expects:
 - relation triplets (from_idx, to_idx, relation_name)
 
 You can export a compatible dataset using the plwordnet-milvus CLI
-(see its repository for details - 
-https://github.com/radlab-dev-group/radlab-plwordnet).
+(see its repository for details — https://github.com/radlab-dev-group/plwordnet).
 Example:
 
 ````bash
