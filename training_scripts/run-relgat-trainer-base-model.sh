@@ -140,8 +140,10 @@ USE_SELF_ADV_NEG=True
 START_DATE_STR=$(date +%Y%m%d_%H%M%S)
 OUT_MODEL_DIR="relgat-models/relgat-${ARCHITECTURE}_${START_DATE_STR}"
 
+RUN_NAME="${ARCHITECTURE}-${START_DATE_STR}"
+
 # This dataset have to prepared using the base embedder (the same as the used in application)
-DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset-identifiers/wtcsnxj9"
+DATASET_ROOT="/mnt/data2/data/resources/plwordnet_handler/relgat/aligned-dataset-identifiers/o78zalgm"
 # Available datasets:
 #  - FULL: dataset_syn_two_way
 #  - SAMPLE: dataset_syn_two_way__limit1k
@@ -184,6 +186,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" relgat-projector-train \
   --pos-cosine-weight="${COSINE_WEIGHT_POS}" \
   --neg-cosine-weight="${COSINE_WEIGHT_NEG}" \
   --mse-weight="${MSE_WEIGHT}" \
+  --run-name="${RUN_NAME}" \
   ${EVAL_N_STEPS:+--eval-every-n-steps="${EVAL_N_STEPS}"} \
   ${WARMUP_STEPS:+--warmup-steps="${WARMUP_STEPS}"} \
   ${GRADIENT_CLIPPING:+--grad-clip-norm="${GRADIENT_CLIPPING}"} \
