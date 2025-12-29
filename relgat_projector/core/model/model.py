@@ -88,7 +88,9 @@ class RelGATModel(nn.Module):
 
         self.scorer_type = scorer_type
         if scorer_type.lower() == "distmult":
-            self.scorer = DistMultScorer(num_rel, rel_dim=_scorer_gat_dim, normalize=True)
+            self.scorer = DistMultScorer(
+                num_rel, rel_dim=_scorer_gat_dim, normalize=True
+            )
         elif scorer_type.lower() == "transe":
             self.scorer = TransEScorer(
                 num_rel, rel_dim=_scorer_gat_dim, normalize=True

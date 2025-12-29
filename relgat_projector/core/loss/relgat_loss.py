@@ -75,7 +75,9 @@ class RelGATLoss:
         """
         with torch.no_grad():
             # [B, K] - stabilizacja numeryczna przez odjęcie maksimum przed softmax
-            neg_score_stable = neg_score - torch.max(neg_score, dim=1, keepdim=True)[0]
+            neg_score_stable = (
+                neg_score - torch.max(neg_score, dim=1, keepdim=True)[0]
+            )
             weights = torch.softmax(self.self_adv_alpha * neg_score_stable, dim=1)
 
         # Stabilizacja log-sigmoid
@@ -87,6 +89,6 @@ class RelGATLoss:
         # Opcjonalnie: dodaj regularyzację L2 do wag
         l2_reg = 0.0
         if self.self_adv_alpha > 0:
-            l2_reg = 0.001 * torch.mean(weights ** 2)
+            l2_reg = 0.001 * torch.mean(weights**2)
 
         return pos_loss + neg_loss + l2_reg
