@@ -48,7 +48,7 @@ STAGES: Dict[str, StageConfig] = {
         name="F3_composition",
         active=[
             "L_anchor", "L_edge", "L_con", "L_isom", "L_cycle",
-            "L_path", "L_curv",
+            "L_path", "L_curv", "L_commut",
         ],
         freeze_operator=False,
         max_steps=2_400,
@@ -57,7 +57,7 @@ STAGES: Dict[str, StageConfig] = {
         name="F4_shadows",
         active=[
             "L_anchor", "L_edge", "L_con", "L_isom", "L_cycle",
-            "L_path", "L_curv", "L_shadow", "L_pull",
+            "L_path", "L_curv", "L_commut", "L_shadow", "L_pull",
             "L_applicability", "L_decoder",
         ],
         freeze_operator=False,

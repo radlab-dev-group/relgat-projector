@@ -41,12 +41,12 @@ class CurvatureLoss(nn.Module):
 
     def forward(
         self,
-        x_a: torch.Tensor,                # [B, D]
+        x_a: torch.Tensor,                # [B, D] base points
         holonomy_x_a: torch.Tensor,       # [B, D]  = H(x_A)
-        r: torch.Tensor,                  # [B] relation ids for commutation
-        s: torch.Tensor,                  # [B]
-        ts_tr: torch.Tensor,              # [B, D]  = T_s(T_r(x))
-        tr_ts: torch.Tensor,              # [B, D]  = T_r(T_s(x))
+        r: torch.Tensor,                  # [B] first route's relation id
+        s: torch.Tensor,                  # [B] second route's relation id
+        ts_tr: torch.Tensor,              # [B, D]  first route result
+        tr_ts: torch.Tensor,              # [B, D]  second route result
     ) -> torch.Tensor:
         hol = (holonomy_x_a - x_a).pow(2).mean(dim=-1)
         loss = hol.mean()
@@ -62,3 +62,40 @@ class CurvatureLoss(nn.Module):
         ).mean()
         loss = loss + comm_part + anti_part
         return loss
+
+    def supervision(
+        self,
+        pos_pairs: list,
+        neg_pairs: list,
+        weight: float = 1.0,
+    ) -> torch.Tensor:
+        """Supervised learning of the commutation matrix ``C_rs``.
+
+        ``C`` has no gradient that would keep it away from 0 in the unsupervised
+        term above (it only multiplies a non-negative gap), so it must be
+        taught from the graph: pairs whose two routes meet in the same node
+        commute (label 1), pairs that were never witnessed commuting must not
+        be assumed to commute (label 0).  Without this term ``C`` collapses to
+        zero and the learned commutation map is meaningless.
+        """
+        dev = self.comm_logit.device
+        terms = []
+        if len(pos_pairs):
+            r = torch.tensor([p[0] for p in pos_pairs], dtype=torch.long, device=dev)
+            s = torch.tensor([p[1] for p in pos_pairs], dtype=torch.long, device=dev)
+            terms.append(
+                nn.functional.binary_cross_entropy_with_logits(
+                    self.comm_logit[r, s], torch.ones_like(r, dtype=torch.float)
+                )
+            )
+        if len(neg_pairs):
+            r = torch.tensor([p[0] for p in neg_pairs], dtype=torch.long, device=dev)
+            s = torch.tensor([p[1] for p in neg_pairs], dtype=torch.long, device=dev)
+            terms.append(
+                nn.functional.binary_cross_entropy_with_logits(
+                    self.comm_logit[r, s], torch.zeros_like(r, dtype=torch.float)
+                )
+            )
+        if not terms:
+            return self.comm_logit.new_zeros(())
+        return weight * torch.stack(terms).mean()

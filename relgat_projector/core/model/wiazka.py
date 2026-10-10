@@ -124,6 +124,16 @@ class WiazkaModel(nn.Module):
             else nn.Identity()
         )
 
+        # projection of the refined/operator space back to the base
+        # (retriever) space, so that a transformed vector can be exported to
+        # the vector database (PLAN.md 2.6, L_pull)
+        self.to_retriever = (
+            nn.Linear(D, node_emb.size(1), bias=False)
+            if D != node_emb.size(1)
+            else nn.Identity()
+        )
+        self.base_dim = node_emb.size(1)
+
         self.use_applicability = use_applicability
         self.use_decoder = use_decoder
         if use_applicability:
@@ -163,6 +173,10 @@ class WiazkaModel(nn.Module):
         if not self.use_applicability:
             return x.new_zeros(x.shape[0])
         return self.applicability.score(x, rel_ids)
+
+    def to_retriever_space(self, x: torch.Tensor) -> torch.Tensor:
+        """Export operator-space vectors into the base (retriever) space."""
+        return self.to_retriever(x)
 
     def decode(self, x: torch.Tensor, y: torch.Tensor):
         if not self.use_decoder:

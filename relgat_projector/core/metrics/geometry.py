@@ -41,15 +41,14 @@ def holonomy_defect(operator, x: torch.Tensor, quadruples) -> float:
     """Mean || H(x_A) - x_A || over closed quadruples."""
     total = 0.0
     n = 0
-    for quad in quadruples:
-        a, r, c, s, b, p, q = quad
-        xa = x[a:a + 1]
-        # H = T_p^{-1} o T_q o T_r o T_s  around A
-        h = operator.apply(xa, torch.tensor([s]))
-        h = operator.apply(h, torch.tensor([r]))
-        h = operator.apply(h, torch.tensor([q]))
-        h = operator.inverse(h, torch.tensor([p]))
-        total += float((h - xa).pow(2).sqrt().mean().item())
+    for d in quadruples:
+        xa = x[d.a:d.a + 1]
+        # H = T_p^-1 o T_s^-1 o T_q o T_r  (loop based at A)
+        h = operator.apply(xa, torch.tensor([d.r], device=x.device))
+        h = operator.apply(h, torch.tensor([d.q], device=x.device))
+        h = operator.inverse(h, torch.tensor([d.s], device=x.device))
+        h = operator.inverse(h, torch.tensor([d.p], device=x.device))
+        total += float((h - xa).pow(2).sum(dim=-1).sqrt().mean().item())
         n += 1
     return total / max(1, n)
 

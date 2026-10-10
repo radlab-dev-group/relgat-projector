@@ -26,11 +26,14 @@ from relgat_projector.core.loss import (
     CurvatureLoss,
     ContrastLoss,
     StabilityLoss,
+    ShadowLoss,
+    DecoderLoss,
 )
 from relgat_projector.core.sampler import (
     PathSampler,
     QuadrupleSampler,
     NegativeSampler,
+    ShadowSampler,
 )
 from relgat_projector.trainer.stages import StageManager
 
@@ -52,6 +55,9 @@ class WiazkaConfig:
     epochs: int = 1
     device: str = "cpu"
     seed: int = 42
+    # number of shadow vectors synthesised when none are supplied (PLAN.md 2.6)
+    num_shadow: int = 512
+    shadow_jitter: float = 0.35
 
 
 def _build_adjacency(
@@ -72,6 +78,7 @@ class WiazkaTrainer:
         rel2idx: Dict[str, int],
         edges: List[Tuple[int, int, str]],
         cfg: Optional[WiazkaConfig] = None,
+        shadow_vectors=None,
     ):
         self.cfg = cfg or WiazkaConfig()
         torch.manual_seed(self.cfg.seed)
@@ -143,6 +150,7 @@ class WiazkaTrainer:
         )
         self.quad_sampler = QuadrupleSampler(
             out_adj=out_adj, in_adj=in_adj, num_nodes=self.num_nodes,
+            num_rel=self.num_rel,
             rng=random.Random(self.cfg.seed + 2),
         )
 
@@ -152,6 +160,26 @@ class WiazkaTrainer:
         self.curvature_loss = CurvatureLoss(self.num_rel)
         self.contrast_loss = ContrastLoss()
         self.stability_loss = StabilityLoss()
+        self.shadow_loss = ShadowLoss()
+        self.decoder_loss = DecoderLoss()
+
+        # shadow manifold: real text vectors from the retriever index.  When
+        # none are provided we synthesise them by jittering the base node
+        # embeddings, which approximates "a text near a node but not the node".
+        if shadow_vectors is None:
+            base_np = self.node_emb.detach().cpu().numpy()
+            rng = np.random.default_rng(self.cfg.seed)
+            idx = rng.integers(0, len(base_np), size=self.cfg.num_shadow)
+            jitter = rng.normal(
+                0.0, self.cfg.shadow_jitter, size=base_np[idx].shape
+            ).astype(np.float32)
+            shadow_np = base_np[idx] + jitter
+        else:
+            shadow_np = np.asarray(shadow_vectors, dtype=np.float32)
+        self.shadow_sampler = ShadowSampler(shadow_np, rng=self.cfg.seed)
+        self._shadow_cache = torch.as_tensor(shadow_np, dtype=torch.float32).to(
+            self.cfg.device
+        )
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
@@ -249,23 +277,75 @@ class WiazkaTrainer:
             loss = loss + l_path
             log["L_path"] = float(l_path.item())
 
-        if self.stage_manager.is_active("L_curv") and quads is not None:
-            a, r, c, s, b, p, q = (
-                torch.tensor([t[i] for t in quads], dtype=torch.long, device=device)
-                for i in range(7)
-            )
+        if self.stage_manager.is_active("L_curv") and quads:
+            a = torch.tensor([d.a for d in quads], dtype=torch.long, device=device)
+            r = torch.tensor([d.r for d in quads], dtype=torch.long, device=device)
+            q = torch.tensor([d.q for d in quads], dtype=torch.long, device=device)
+            p = torch.tensor([d.p for d in quads], dtype=torch.long, device=device)
+            s = torch.tensor([d.s for d in quads], dtype=torch.long, device=device)
             xa = refined[a]
-            # H = T_p^{-1} o T_q o T_r o T_s  (around A)
-            h = self.model.apply(xa, s)
-            h = self.model.apply(h, r)
+            # holonomy around the diamond: H = T_p^-1 o T_s^-1 o T_q o T_r
+            h = self.model.apply(xa, r)
             h = self.model.apply(h, q)
+            h = self.model.inverse(h, s)
             h = self.model.inverse(h, p)
-            # commutation sample: use (r, s) with x_A
-            trs = self.model.apply(self.model.apply(xa, r), s)
-            tsr = self.model.apply(self.model.apply(xa, s), r)
-            l_curv = self.curvature_loss(xa, h, r, s, tsr, trs)
+            # the two routes A->D of the diamond
+            route1 = self.model.apply(self.model.apply(xa, r), q)
+            route2 = self.model.apply(self.model.apply(xa, p), s)
+            l_curv = self.curvature_loss(xa, h, r, p, route1, route2)
             loss = loss + l_curv
             log["L_curv"] = float(l_curv.item())
+
+        if self.stage_manager.is_active("L_commut"):
+            # the commutation matrix C_rs has no gradient that keeps it away
+            # from 0 in the unsupervised penalty, so it is taught from the
+            # graph: relation pairs whose two routes meet are commuting.
+            pos_pairs, neg_pairs = self.quad_sampler.sample_relation_pairs(
+                batch_size=16, max_neg=16
+            )
+            if pos_pairs:
+                l_comm = self.curvature_loss.supervision(pos_pairs, neg_pairs)
+                loss = loss + l_comm
+                log["L_commut"] = float(l_comm.item())
+
+        if self.stage_manager.is_active("L_shadow"):
+            # cycle + commutation consistency OFF the graph (PLAN.md 2.6)
+            z_base = self._shadow_cache[: min(64, self._shadow_cache.shape[0])]
+            z = self.model.base_to_op(z_base)
+            r_sh = torch.randint(0, self.num_rel, (z.shape[0],), device=device)
+            back = self.model.inverse(self.model.apply(z, r_sh), r_sh)
+            l_sh_cyc = self.shadow_loss.cycle(z, back)
+            s_sh = (r_sh + 1) % self.num_rel
+            trst = self.model.apply(self.model.apply(z, r_sh), s_sh)
+            tstr = self.model.apply(self.model.apply(z, s_sh), r_sh)
+            l_sh_com = self.shadow_loss.commute(trst, tstr)
+            loss = loss + l_sh_cyc + l_sh_com
+            log["L_shadow_cycle"] = float(l_sh_cyc.item())
+            log["L_shadow_commut"] = float(l_sh_com.item())
+
+        if self.stage_manager.is_active("L_pull"):
+            # exporting a transformed vector must preserve its neighbourhood
+            # in the retriever space (base vectors are the index)
+            p_trans = self.model.to_retriever_space(transformed)
+            base = self.model.node_emb_fixed
+            cos_pos = torch.nn.functional.cosine_similarity(
+                p_trans, base[dst], dim=-1
+            )
+            neg_rows = torch.randint(
+                0, base.shape[0], (B, self.cfg.num_neg), device=device
+            )
+            cos_neg = torch.nn.functional.cosine_similarity(
+                p_trans.unsqueeze(1), base[neg_rows], dim=-1
+            )
+            l_pull = (1.0 - cos_pos).mean() + cos_neg.mean().clamp_min(0.0) * 0.5
+            loss = loss + l_pull
+            log["L_pull"] = float(l_pull.item())
+
+        if self.stage_manager.is_active("L_decoder"):
+            logits, conf = self.model.decoder(x_a, x_b)
+            l_dec = self.decoder_loss(logits, conf, rel)
+            loss = loss + l_dec
+            log["L_decoder"] = float(l_dec.item())
 
         if self.stage_manager.is_active("L_applicability"):
             # negatives: applicability should be low on type-invalid pairs
