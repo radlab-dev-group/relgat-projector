@@ -117,6 +117,83 @@ Common flags:
 - Checkpoints in save-dir/checkpoint-<step> (if enabled)
 - Final model in save-dir
 
+## WIĄZKA — relational transport trainer (new)
+
+A second training path (`feature/wiazka-rgt`) treats a semantic graph
+(Słowosieć / WordNet / ontology) as a **connection**: nodes carry a vector,
+relations are *invertible linear maps in the same space*, and a chain of
+relations compiles to a single matrix.
+
+    T_r(x) = s_r · exp(θ_rᵀ B) x ∈ R⁺ × O(D)        T⁻¹ exact, cosine preserving
+
+What it gives you:
+
+- **`t → r₁ → … → rₖ → t′` in one matmul** — `conn.compile([r1, r2])` folds a
+  whole chain; no graph traversal at query time;
+- **`λ` dial** — `conn.apply(v, "hyper", lam=0.4)` = "40 % more general",
+  with `λ = 0` exactly the identity;
+- **path consistency as the training signal** — holonomy + a learned
+  commutation matrix `C_rs` instead of heuristically supervised long paths; this
+  is what makes the operator valid on vectors that were never graph nodes;
+- **applicability head** — `conn.applicability(v, "ant")` says when a relation
+  is meaningless for a vector, so a search pipeline can refuse instead of
+  returning noise;
+- **relation decoder** — `conn.decode(v, v3)` answers "which relation maps this
+  query to those results?".
+
+### Training
+
+```bash
+relgat-projector-wiazka \
+  --nodes-embeddings-path=.../lexical_units_embedding.pickle \
+  --relations-mapping=.../relation_to_idx.json \
+  --relations-triplets=.../relations_triplets.json \
+  --operator=givens --op-dim=256 --num-generators=16 \
+  --epochs=20 --batch-size=128 --train-ratio=0.90 \
+  --device=cuda --save-dir=wiazka-models/run1
+```
+
+`training_scripts/run-wiazka-trainer.sh` is a ready-to-edit template. The
+trainer runs the `F1 nodes → F2 relations → F3 composition → F4 shadows`
+curriculum; each stage advances only when its gate is met **on held-out
+edges**. It prints the learned `C_rs` table and writes
+`commutation_C.csv`, `config.json`, `metrics.json` and `report.json`.
+
+Baselines for ablation share the same interface: `--operator=distmult|transe`.
+
+### Inference
+
+```python
+from relgat_projector.inference import RelationFlow
+
+conn = RelationFlow.load("wiazka-models/run1")
+v  = conn.refine(base_vec)                    # (1) refined representation
+v2 = conn.apply(v, "syn")                     # (3) one relation step
+v3 = conn.apply_chain(v, ["ant", "syn"])      # (3) relation chain
+op = conn.compile(["ant", "syn"])             # (3) one operator for the chain
+v4 = conn.apply(v, "hyper", lam=0.4)          # (3) dial: "lightly generalise"
+p  = conn.applicability(v, "ant")             # (4) is it defined at all?
+r, conf = conn.decode(v, v3)                  # (5) "which relation was this?"
+out = conn.to_retriever_space(v3)             # export for the vector database
+```
+
+### Metrics
+
+Beyond MRR/Hits: **PCE(k)** (path compilation error — the headline curve),
+**CCE** (cycle closure), **ISOT** (cosine distortion), **HD** (holonomy
+defect), **OMD** (off-manifold degradation on real text vectors), and
+applicability **AUC/ECE**. See `docs/GEOMETRY.md` for definitions, thresholds,
+reference numbers and how to read `C_rs`.
+
+### Notes
+
+- The `WIĄZKA` path is self-contained: it does not import the legacy
+  `RelGATTrainer` and works with the pure-PyTorch scatter fallback
+  (`export RELgat_NO_TORCH_SCATTER=1`), which is required where the
+  `torch_scatter` wheel segfaults on import.
+- Tests: `pytest tests/` (`test_operator_givens.py`, `test_wiazka_e2e.py`,
+  `test_commutation_learning.py`, `test_checkpoint_and_ablation.py`).
+
 ## Requirements
 - Python 3.9+
 - PyTorch
