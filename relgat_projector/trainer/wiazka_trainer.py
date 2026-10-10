@@ -210,7 +210,9 @@ class WiazkaTrainer:
 
         if self.stage_manager.is_active("L_con"):
             # in-batch contrast: query = T_r(x_A) (op space), keys = refined
-            neg_idx = self.neg_sampler.sample(list(dst.cpu().numpy()), k=self.cfg.num_neg)
+            neg_idx = self.neg_sampler.sample_pool(
+                list(dst.cpu().numpy()), k=self.cfg.num_neg
+            )
             neg_nodes = torch.tensor(neg_idx, dtype=torch.long).to(device)
             keys = torch.cat([refined, refined[neg_nodes]], dim=0)  # [N + B*K, D]
             q = transformed
@@ -314,8 +316,16 @@ class WiazkaTrainer:
             avg = {k: v / n for k, v in epoch_log.items()}
             avg["epoch"] = epoch
             avg["stage"] = self.stage_manager.order[self.stage_manager.current]
+
+            # stage acceptance is measured on eval metrics, not train losses
+            eval_metrics = self.evaluate(n_probe=min(128, max(16, len(self.edges))))
+            avg.update(eval_metrics)
             history.append(avg)
-            if self.stage_manager.should_stop(avg):
+            if self.stage_manager.should_stop(eval_metrics):
+                print(
+                    f"[stage] {self.stage_manager.order[self.stage_manager.current]}"
+                    f" -> gate passed, advancing"
+                )
                 self.stage_manager.advance()
         return history
 
@@ -343,25 +353,23 @@ class WiazkaTrainer:
                 self.model.operator, refined[src[:64]], refined[dst[:64]], rel[0]
             ),
         }
-        # PCE curve
-        chains = {}
-        targets = {}
+        # PCE curve: for each k, sample paths of *exactly* length k
         for k in range(1, 4):
-            paths = self.path_sampler.sample_batch(min(64, n_probe))
+            paths = []
+            tries = 0
+            while len(paths) < 32 and tries < 2000:
+                tries += 1
+                p = self.path_sampler.sample()
+                if p is not None and len(p[1]) == k:
+                    paths.append(p)
             if not paths:
                 continue
             psrc = torch.tensor([p[0] for p in paths], dtype=torch.long, device=device)
-            pk = max(len(p[1]) for p in paths)
-            prels = torch.zeros(len(paths), pk, dtype=torch.long, device=device)
+            prels = torch.tensor([p[1] for p in paths], dtype=torch.long, device=device)
             pdst = torch.tensor([p[2] for p in paths], dtype=torch.long, device=device)
-            for i, p in enumerate(paths):
-                prels[i, : len(p[1])] = torch.tensor(p[1], device=device)
-            chains[len(paths) and pk] = prels
-            targets[pk] = refined[pdst]
-        if chains:
-            curve = geometry.pce_curve(self.model.operator, refined, chains, targets,
-                                       max_k=3)
-            out["eval/pce_k1"] = curve[0] if len(curve) > 0 else float("nan")
-            out["eval/pce_k2"] = curve[1] if len(curve) > 1 else float("nan")
-            out["eval/pce_k3"] = curve[2] if len(curve) > 2 else float("nan")
+            chain_t = self.model.apply_chain(refined[psrc], prels)
+            cos = torch.nn.functional.cosine_similarity(
+                chain_t, refined[pdst], dim=-1
+            )
+            out[f"eval/pce_k{k}"] = float((1.0 - cos).mean().item())
         return out

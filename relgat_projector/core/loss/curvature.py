@@ -54,7 +54,8 @@ class CurvatureLoss(nn.Module):
         c = self.commutation()
         c_rs = c[r, s]  # [B]
         gap = (ts_tr - tr_ts).pow(2).mean(dim=-1)  # [B]
-        gap_l2 = gap.sqrt()
+        # eps inside sqrt: commuting pairs can give a difference of exactly 0
+        gap_l2 = torch.sqrt(gap + 1e-12)
         comm_part = self.comm_weight * (c_rs * gap).mean()
         anti_part = self.anti_weight * (
             (1.0 - c_rs) * (gap_l2 - self.margin).clamp_min(0.0)

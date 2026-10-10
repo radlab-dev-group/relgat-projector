@@ -14,6 +14,8 @@ import torch.nn as nn
 
 
 class StabilityLoss(nn.Module):
+    EPS = 1e-12
+
     def __init__(
         self,
         cycle_weight: float = 1.0,
@@ -43,7 +45,12 @@ class StabilityLoss(nn.Module):
     ) -> torch.Tensor:
         loss = x.new_zeros(())
         if t_inv_t_x is not None:
-            loss = loss + self.cycle_weight * (t_inv_t_x - x).pow(2).sqrt().mean()
+            # eps INSIDE the sqrt: an exact inverse yields a difference of
+            # exactly 0, and d/dx sqrt(x) at 0 is infinite -> NaN gradients.
+            diff = t_inv_t_x - x
+            loss = loss + self.cycle_weight * torch.sqrt(
+                diff.pow(2).mean() + self.EPS
+            )
         if None not in (u, v, tu, tv):
             cos_in = F_cos(u, v)
             cos_out = F_cos(tu, tv)

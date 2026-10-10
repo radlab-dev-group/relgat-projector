@@ -36,13 +36,13 @@ STAGES: Dict[str, StageConfig] = {
         name="F1_nodes",
         active=["L_anchor", "L_edge"],
         freeze_operator=True,
-        max_steps=5000,
+        max_steps=400,
     ),
     "F2_relations": StageConfig(
         name="F2_relations",
         active=["L_anchor", "L_edge", "L_con", "L_isom", "L_cycle"],
         freeze_operator=False,
-        max_steps=20_000,
+        max_steps=1_200,
     ),
     "F3_composition": StageConfig(
         name="F3_composition",
@@ -51,7 +51,7 @@ STAGES: Dict[str, StageConfig] = {
             "L_path", "L_curv",
         ],
         freeze_operator=False,
-        max_steps=30_000,
+        max_steps=2_400,
     ),
     "F4_shadows": StageConfig(
         name="F4_shadows",
@@ -62,19 +62,39 @@ STAGES: Dict[str, StageConfig] = {
         ],
         freeze_operator=False,
         enable_context=True,
-        max_steps=40_000,
+        max_steps=4_000,
     ),
 }
 
 STAGE_ORDER = ["F1_nodes", "F2_relations", "F3_composition", "F4_shadows"]
 
 
+# metric -> True when *lower* is better (PLAN.md section 4)
+LOWER_IS_BETTER = {
+    "eval/cce": True,
+    "eval/isot": True,
+    "eval/pce_k1": True,
+    "eval/pce_k2": True,
+    "eval/pce_k3": True,
+    "eval/cos_edge": False,
+}
+
+DEFAULT_GATES: Dict[str, Dict[str, float]] = {
+    # stage -> {metric: threshold} (PLAN.md section 4)
+    "F1_nodes": {"eval/cos_edge": 0.9},
+    "F2_relations": {"eval/cce": 0.02},
+    "F3_composition": {"eval/pce_k2": 0.10},
+}
+
+
 class StageManager:
     def __init__(self, order: Optional[List[str]] = None,
-                 gates: Optional[Dict[str, float]] = None):
+                 gates: Optional[Dict[str, Dict[str, float]]] = None):
         self.order = order or STAGE_ORDER
         # acceptance gates (metric -> threshold); default to "no gate"
-        self.gates = gates or {}
+        self.gates = gates if gates is not None else {
+            k: dict(v) for k, v in DEFAULT_GATES.items()
+        }
         self.current = 0
         self.steps_in_stage = 0
 
@@ -98,7 +118,11 @@ class StageManager:
             value = metrics.get(metric)
             if value is None:
                 continue
-            if value >= threshold:
+            lower_better = LOWER_IS_BETTER.get(metric, False)
+            if lower_better:
+                if value <= threshold:
+                    return self.current < len(self.order) - 1
+            elif value >= threshold:
                 return self.current < len(self.order) - 1
         return False
 
