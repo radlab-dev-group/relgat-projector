@@ -1,0 +1,170 @@
+"""
+WIĄZKA model: transport-aware GAT + relational operator + heads.
+
+Wraps the existing :class:`RelGATLayer` (node refinement) together with a
+:class:`RelationalOperator` (relations as transport) and the applicability /
+relation-decoder heads, exposing the single interface used by the training
+stages and the inference API.
+
+Node refinement is *transport-aware*: the message from ``u`` to ``v`` over
+relation ``r`` is ``T_r(proj(x_u))`` (PLAN.md 3.2a) instead of a bare
+attention-weighted projection, and a residual + ``L_anchor`` keeps nodes in
+the neighbourhood of their base embeddings.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from relgat_projector.utils.scatter import scatter_add
+from relgat_projector.core.operator.base import RelationalOperator
+from relgat_projector.core.heads.applicability import ApplicabilityHead
+from relgat_projector.core.heads.relation_decoder import RelationDecoder
+
+
+class TransportGATLayer(nn.Module):
+    """One transport-aware message-passing layer (PLAN.md 3.2a)."""
+
+    def __init__(self, in_dim: int, out_dim: int, operator: RelationalOperator,
+                 heads: int = 1, dropout: float = 0.1):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.heads = heads
+        self.operator = operator
+        # project the operator space to the GAT space (per head)
+        self.proj = nn.ModuleList(
+            [nn.Linear(out_dim, out_dim, bias=False) for _ in range(heads)]
+        )
+        # project base features to operator space (when dims differ)
+        self.base_proj = (
+            nn.Linear(in_dim, out_dim, bias=False) if in_dim != out_dim else nn.Identity()
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.act = nn.GELU()
+
+    def forward(
+        self,
+        base_emb: torch.Tensor,   # [N, in_dim]  (fixed base vectors)
+        refined: torch.Tensor,    # [N, out_dim] (current refinement, op space)
+        edge_index: torch.Tensor, # [2, E]
+        edge_type: torch.Tensor,  # [E]
+    ) -> torch.Tensor:
+        src, dst = edge_index
+        N = base_emb.size(0)
+
+        # base features projected to operator space
+        b = self.base_proj(base_emb)  # [N, out_dim]
+
+        # transport-aware messages: T_r(proj(x_u))
+        msgs = []
+        for h in range(self.heads):
+            proj_src = self.proj[h](refined)[src]  # [E, out_dim]
+            transported = self.operator.apply(proj_src, edge_type)  # [E, out_dim]
+            msgs.append(transported)
+
+        out = torch.cat(
+            [scatter_add(m, dst, dim=0, dim_size=N) for m in msgs], dim=-1
+        )  # [N, heads*out_dim]
+
+        # fold heads back to out_dim
+        out = out.view(N, self.heads, self.out_dim).mean(dim=1)
+        # residual + norm (stabilises deep stacking, keeps anchor)
+        out = self.act(refined + out)
+        out = F.layer_norm(out, (self.out_dim,))
+        return self.dropout(out)
+
+
+class WiazkaModel(nn.Module):
+    """Full WIĄZKA model (refinement + operator + heads)."""
+
+    def __init__(
+        self,
+        node_emb: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_type: torch.Tensor,
+        num_rel: int,
+        operator: RelationalOperator,
+        gat_num_layers: int = 2,
+        gat_heads: int = 2,
+        dropout: float = 0.1,
+        use_applicability: bool = True,
+        use_decoder: bool = True,
+    ):
+        super().__init__()
+        self.register_buffer("node_emb_fixed", node_emb)
+        self.register_buffer("edge_index", edge_index)
+        self.register_buffer("edge_type", edge_type)
+        self.num_rel = num_rel
+        self.operator = operator
+        self._op_dim = operator.dim
+
+        D = self._op_dim
+        self.layers = nn.ModuleList(
+            [
+                TransportGATLayer(
+                    in_dim=node_emb.size(1),
+                    out_dim=D,
+                    operator=operator,
+                    heads=gat_heads,
+                    dropout=dropout,
+                )
+                for _ in range(max(1, gat_num_layers))
+            ]
+        )
+
+        # the refined node vectors live in operator space; initialise them as
+        # a projection of the base embeddings (so that T_r is well-defined on
+        # them from step 0)
+        self.base_to_op = (
+            nn.Linear(node_emb.size(1), D, bias=False)
+            if node_emb.size(1) != D
+            else nn.Identity()
+        )
+
+        self.use_applicability = use_applicability
+        self.use_decoder = use_decoder
+        if use_applicability:
+            self.applicability = ApplicabilityHead(D, num_rel)
+        if use_decoder:
+            self.decoder = RelationDecoder(D, num_rel)
+
+    # ------------------------------------------------------------- refinement
+    def refine(self) -> torch.Tensor:
+        """Return refined node vectors ``[N, D_op]`` in operator space."""
+        x = self.base_to_op(self.node_emb_fixed)
+        for layer in self.layers:
+            x = layer(self.node_emb_fixed, x, self.edge_index, self.edge_type)
+        return x
+
+    def get_node_repr(self) -> torch.Tensor:
+        return self.refine()
+
+    # ------------------------------------------------------------------ apply
+    def apply(self, x: torch.Tensor, rel_ids: torch.Tensor,
+              lambdas: torch.Tensor | None = None) -> torch.Tensor:
+        return self.operator.apply(x, rel_ids, lambdas)
+
+    def apply_chain(self, x: torch.Tensor, rel_ids: torch.Tensor,
+                    lambdas: torch.Tensor | None = None) -> torch.Tensor:
+        return self.operator.apply_chain(x, rel_ids, lambdas)
+
+    def compiled(self, rel_ids: torch.Tensor,
+                 lambdas: torch.Tensor | None = None):
+        return self.operator.compiled(rel_ids, lambdas)
+
+    def inverse(self, x: torch.Tensor, rel_ids: torch.Tensor) -> torch.Tensor:
+        return self.operator.inverse(x, rel_ids)
+
+    def applicability_score(self, x: torch.Tensor,
+                            rel_ids: torch.Tensor) -> torch.Tensor:
+        if not self.use_applicability:
+            return x.new_zeros(x.shape[0])
+        return self.applicability.score(x, rel_ids)
+
+    def decode(self, x: torch.Tensor, y: torch.Tensor):
+        if not self.use_decoder:
+            raise RuntimeError("decoder disabled")
+        return self.decoder.decode(x, y)
