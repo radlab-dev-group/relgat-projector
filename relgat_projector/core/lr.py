@@ -97,7 +97,12 @@ class TrainingScheduler:
         self, epochs: int, train_dataset, train_batch_size: int
     ):
         steps_per_epoch = max(1, math.ceil(len(train_dataset) / train_batch_size))
-        self.total_steps = steps_per_epoch * max(1, int(epochs))
+
+        # NAPRAWA: epochs jako integer
+        epochs_int = (
+            int(epochs) if isinstance(epochs, int) else math.ceil(float(epochs))
+        )
+        self.total_steps = steps_per_epoch * max(1, epochs_int)
 
         if self.warmup_steps is None:
             self.warmup_steps = int(self.default_warmup_ratio * self.total_steps)

@@ -19,12 +19,18 @@ class RelGATDataset:
         eval_batch_size: int,
         device: str,
         run_config: Dict[str, Any],
+        seed: int = 42,
     ):
         # Raw dataset
         self.node2emb = node2emb
         self.rel2idx = rel2idx
         self.num_rel = len(self.rel2idx)
         self.edge_index_raw = edge_index_raw
+
+        # USTAWIENIE SEEDA PRZED SHUFFLE (naprawa błędu)
+        self.seed = int(run_config.get("seed", seed))
+        random.seed(self.seed)
+        torch.manual_seed(self.seed)
 
         self.device = device
         self.train_ratio = float(run_config.get("train_ratio", train_ratio))
@@ -68,7 +74,7 @@ class RelGATDataset:
         ).to(self.device)
 
     def _prepare_dataset(self):
-        # random division of edges to train/test
+        # SHUFFLE PO USTAWIENIU SEEDA (naprawa błędu)
         random.shuffle(self.edge_index_raw)
         n_edges = len(self.edge_index_raw)
         n_train = int(self.train_ratio * n_edges)
@@ -110,14 +116,16 @@ class RelGATDataset:
             shuffle=True,
             num_workers=0,
             collate_fn=lambda batch: batch,
+            pin_memory=True,  # Ulepszenie: pin memory
         )
 
         self.eval_loader = DataLoader(
             self.eval_dataset,
             batch_size=self.eval_batch_size,
-            shuffle=True,
+            shuffle=False,  # Eval bez shuffle
             num_workers=0,
             collate_fn=lambda batch: batch,
+            pin_memory=True,  # Ulepszenie: pin memory
         )
 
     def _prepare_edge_dataset(self):

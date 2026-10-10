@@ -19,6 +19,9 @@ plwordnet-milvus \
 """
 
 import argparse
+import json
+import numpy as np
+from typing import Optional, Dict, Any
 
 from relgat_projector.base.constants import ConstantsRelGATTrainer
 from relgat_projector.handlers.models.relgat import RelGATMainTrainerHandler
@@ -39,6 +42,7 @@ def get_args() -> argparse.Namespace:
     # Dataset
     parser.add_argument(
         "--nodes-embeddings-path",
+        dest="nodes_embeddings_path",
         type=str,
         required=True,
         help="Path to file with lexical units embeddings (nodes)",
@@ -57,9 +61,33 @@ def get_args() -> argparse.Namespace:
         "where the single triplet is as follow: [from_lu_idx, to_lu_idx, rel_name]",
     )
 
+    # Ontology-aware features
+    parser.add_argument(
+        "--ontology-similarity",
+        type=str,
+        default=None,
+        help="Path to ontology similarity matrix (JSON or numpy .npy). "
+        "Enables ontology regularization if provided.",
+    )
+    parser.add_argument(
+        "--ontology-reg-weight",
+        type=float,
+        default=0.0,
+        help="Weight for ontology regularization loss (default: 0.0 = disabled)",
+    )
+
+    # WordNet initialization
+    parser.add_argument(
+        "--wordnet-rel-embeddings",
+        type=str,
+        default=None,
+        help="Path to WordNet relation embeddings (.pt file) for initialization.",
+    )
+
     # Architecture definition, learning process
     parser.add_argument(
         "--train-ratio",
+        dest="train_ratio",
         type=float,
         default=ConstantsRelGATTrainer.Default.TRAIN_EVAL_RATIO,
         help=f"Ratio of training data "
@@ -81,10 +109,10 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-every-n-steps",
-        type=int,
         dest="log_every_n_steps",
+        type=int,
         default=ConstantsRelGATTrainer.Default.LOG_EVERY_N_STEPS,
-        help=f"Batch size "
+        help=f"Log every N steps "
         f"(default: {ConstantsRelGATTrainer.Default.LOG_EVERY_N_STEPS})",
     )
     parser.add_argument(
@@ -142,7 +170,7 @@ def get_args() -> argparse.Namespace:
         help="Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP",
     )
     parser.add_argument(
-        "--projection_dropout",
+        "--projection-dropout",
         dest="projection_dropout",
         type=float,
         default=ConstantsRelGATTrainer.Default.PROJECTION_DROPOUT,
@@ -153,8 +181,9 @@ def get_args() -> argparse.Namespace:
         "--projection-hidden-dim",
         dest="projection_hidden_dim",
         type=int,
-        default=3,
-        help="Projection layers. 0 - Identity, 1 - Linear, >=2 - MLP",
+        default=ConstantsRelGATTrainer.Default.GAT_OUT_DIM,
+        help="Hidden dimension for projection MLP. "
+        f"(default: {ConstantsRelGATTrainer.Default.GAT_OUT_DIM})",
     )
     parser.add_argument(
         "--dropout",
@@ -170,7 +199,7 @@ def get_args() -> argparse.Namespace:
         type=float,
         default=ConstantsRelGATTrainer.Default.GAT_ATT_DROPOUT,
         help=f"GAT attention dropout on relations"
-        f"(default: {ConstantsRelGATTrainer.Default.GAT_DROPOUT})",
+        f"(default: {ConstantsRelGATTrainer.Default.GAT_ATT_DROPOUT})",
     )
     parser.add_argument(
         "--lr",
@@ -250,14 +279,6 @@ def get_args() -> argparse.Namespace:
         default=42,
         help="Random seed for reproducibility (default: 42)",
     )
-    #
-    # # mixed precision
-    # parser.add_argument(
-    #     "--use-amp",
-    #     dest="use_amp",
-    #     action="store_true",
-    #     help="Enable Automatic Mixed Precision (AMP) training",
-    # )
 
     # Saving model to dir
     parser.add_argument(
@@ -309,11 +330,20 @@ def get_args() -> argparse.Namespace:
     )
 
     # Optional margin argument
-    parser.add_argument("--margin", type=float, default=1.0)
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=1.0,
+        help="Margin for margin ranking loss (default: 1.0)",
+    )
 
     # Multi objective loss function
     parser.add_argument(
-        "--relgat-weight", dest="relgat_weight", type=float, default=1.0
+        "--relgat-weight",
+        dest="relgat_weight",
+        type=float,
+        default=1.0,
+        help="Weight for RelGAT ranking loss (default: 1.0)",
     )
     parser.add_argument(
         "--pos-cosine-weight",
@@ -329,32 +359,87 @@ def get_args() -> argparse.Namespace:
         default=1.0,
         help="Weight for negative cosine loss (default: 1.0)",
     )
-    parser.add_argument("--mse-weight", dest="mse_weight", type=float, default=0.0)
+    parser.add_argument(
+        "--mse-weight",
+        dest="mse_weight",
+        type=float,
+        default=0.0,
+        help="Weight for MSE loss (default: 0.0)",
+    )
+
+    # Relation attention
+    parser.add_argument(
+        "--relation-attention",
+        dest="relation_attention",
+        action="store_true",
+        default=True,
+        help="Enable relation-level attention (default: True)",
+    )
 
     return parser.parse_args()
 
 
 def main() -> None:
     args = get_args()
-    _hdl = RelGATMainTrainerHandler
 
-    node2emb, rel2idx, edge_index_raw = _hdl.load_embeddings_and_edges(
-        path_to_nodes=args.nodes_embeddings_path,
-        path_to_rels=args.relations_mapping,
-        path_to_edges=args.relations_triplets,
-    )
+    # Walidacja argumentów
+    if not (0 < args.train_ratio < 1):
+        raise ValueError(
+            f"--train-ratio must be in range (0, 1), got {args.train_ratio}"
+        )
+
+    if args.projection_hidden_dim <= 0:
+        raise ValueError(
+            f"--projection-hidden-dim must be > 0, got {args.projection_hidden_dim}"
+        )
+
+    # Obciążenie similarity ontologii
+    ontology_similarity = None
+    if args.ontology_similarity:
+        if args.ontology_similarity.endswith(".npy"):
+            try:
+                ontology_similarity = np.load(args.ontology_similarity)
+                print(
+                    f"Loaded ontology similarity matrix from {args.ontology_similarity}"
+                )
+            except Exception as e:
+                print(f"Warning: Could not load ontology similarity: {e}")
+        elif args.ontology_similarity.endswith(".json"):
+            try:
+                with open(args.ontology_similarity, "r") as f:
+                    ontology_similarity = np.array(json.load(f))
+                print(
+                    f"Loaded ontology similarity matrix from {args.ontology_similarity}"
+                )
+            except Exception as e:
+                print(f"Warning: Could not load ontology similarity: {e}")
+        else:
+            print(
+                f"Warning: Unknown ontology similarity format: {args.ontology_similarity}"
+            )
+
+    # Obciążenie embeddings WordNet
+    wordnet_embeddings = None
+    if args.wordnet_rel_embeddings:
+        try:
+            import torch
+
+            wordnet_embeddings = torch.load(args.wordnet_rel_embeddings)
+            print(
+                f"Loaded WordNet relation embeddings from {args.wordnet_rel_embeddings}"
+            )
+        except Exception as e:
+            print(f"Warning: Could not load WordNet embeddings: {e}")
 
     if args.save_every_n_steps is not None and args.save_every_n_steps <= 0:
         args.save_every_n_steps = None
 
-    if args.warmup_steps is not None and len(str(args.warmup_steps).strip()):
+    if args.warmup_steps is not None and str(args.warmup_steps).strip():
         args.warmup_steps = int(args.warmup_steps)
     else:
         args.warmup_steps = None
 
-    if args.eval_every_n_steps is not None and len(
-        str(args.eval_every_n_steps).strip()
-    ):
+    if args.eval_every_n_steps is not None and str(args.eval_every_n_steps).strip():
         args.eval_every_n_steps = int(args.eval_every_n_steps)
         if args.save_every_n_steps is not None and args.save_every_n_steps:
             if args.save_every_n_steps < args.eval_every_n_steps:
@@ -371,14 +456,33 @@ def main() -> None:
     else:
         args.eval_every_n_steps = None
 
+    _hdl = RelGATMainTrainerHandler
+
+    node2emb, rel2idx, edge_index_raw = _hdl.load_embeddings_and_edges(
+        path_to_nodes=args.nodes_embeddings_path,
+        path_to_rels=args.relations_mapping,
+        path_to_edges=args.relations_triplets,
+    )
+
+    # Build run_config z dodatkowymi parametrami
+    run_config = {
+        "ontology_similarity": ontology_similarity,
+        "ontology_reg_weight": args.ontology_reg_weight,
+        "relation_attention": args.relation_attention,
+        "wordnet_rel_embeddings": wordnet_embeddings,
+    }
+
     trainer = _hdl.build_trainer(
         node2emb=node2emb,
         rel2idx=rel2idx,
         edge_index_raw=edge_index_raw,
         args=args,
+        run_config=run_config,
     )
 
+    print(f"Starting training with {args.epochs} epochs...")
     trainer.train(epochs=args.epochs)
+    print("Training completed.")
 
 
 if __name__ == "__main__":
