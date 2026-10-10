@@ -181,8 +181,16 @@ class WiazkaTrainer:
             self.cfg.device
         )
 
+        # NOTE: CurvatureLoss owns the commutation matrix C_rs as a parameter,
+        # so the optimizer must include the loss modules, not only the model.
+        # Omitting them silently freezes C_rs at its initialisation.
+        params = list(self.model.parameters())
+        for module in (self.curvature_loss,):
+            params += [
+                p for p in module.parameters() if p.requires_grad
+            ]
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
+            params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
         )
         self.stage_manager = StageManager()
 

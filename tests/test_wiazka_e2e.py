@@ -70,3 +70,35 @@ def test_inference_api_roundtrip():
 
     names, conf = conn.decode(v, v3)
     assert len(names) == 1 and 0.0 <= float(conf[0]) <= 1.0
+
+
+def test_loss_owned_parameters_are_optimised():
+    """The commutation matrix lives in CurvatureLoss, not in the model.
+
+    A trainer that optimises ``model.parameters()`` only freezes it silently,
+    which is why the learned commutation map used to stay at 0.5 forever.
+    """
+    node2emb, rel2idx, edges = _toy_graph()
+    cfg = WiazkaConfig(op_dim=24, num_generators=6, gat_num_layers=1,
+                       gat_heads=1, batch_size=16, epochs=1, device="cpu")
+    trainer = WiazkaTrainer(node2emb, rel2idx, edges, cfg)
+    opt_ids = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
+    for p in trainer.curvature_loss.parameters():
+        assert id(p) in opt_ids, "C_rs is not optimised by the trainer"
+
+
+def test_stage_manager_direction_of_better():
+    from relgat_projector.trainer.stages import StageManager
+
+    mgr = StageManager()
+    # CCE is lower-is-better: a small value must advance the stage
+    mgr.current = 1
+    assert mgr.should_stop({"eval/cce": 1e-6}) is True
+    mgr2 = StageManager()
+    mgr2.current = 1
+    assert mgr2.should_stop({"eval/cce": 0.9}) is False
+    # cos_edge is higher-is-better
+    mgr3 = StageManager()
+    mgr3.current = 0
+    assert mgr3.should_stop({"eval/cos_edge": 0.99}) is True
+    assert StageManager().should_stop({"eval/cos_edge": 0.1}) is False
