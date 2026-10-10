@@ -30,6 +30,7 @@ class RelationFlow:
         self.idx2rel = {v: k for k, v in rel2idx.items()}
         self.projector = projector
         self.device = device
+        self.meta: dict = {}
         model.eval()
 
     # ------------------------------------------------------------- factories
@@ -41,18 +42,26 @@ class RelationFlow:
     @classmethod
     def load(cls, ckpt_dir: str, projector=None,
              device: str = "cpu") -> "RelationFlow":
-        """Load from a directory written by :meth:`save`."""
-        state = torch.load(os.path.join(ckpt_dir, "pytorch_model.bin"),
-                           map_location=device)
-        cfg = torch.load(os.path.join(ckpt_dir, "config.pt"), map_location=device)
-        model = cfg["model_factory"]()
-        model.load_state_dict(state["model"])
-        model = model.to(device)
-        return cls(model, state["rel2idx"], projector=projector, device=device)
+        """Load from a directory written by :meth:`save` (see ``wiazka_checkpoint``)."""
+        from relgat_projector.handlers.wiazka_checkpoint import load_checkpoint
 
-    def save(self, ckpt_dir: str) -> None:
-        os.makedirs(ckpt_dir, exist_ok=True)
-        torch.save(self.model.state_dict(), os.path.join(ckpt_dir, "pytorch_model.bin"))
+        model, rel2idx, _spec, meta = load_checkpoint(ckpt_dir, device=device)
+        flow = cls(model, rel2idx, projector=projector, device=device)
+        flow.meta = meta
+        return flow
+
+    def save(self, ckpt_dir: str, config: Optional[dict] = None,
+             commutation: Optional[torch.Tensor] = None) -> str:
+        """Write a full checkpoint (model + declarative spec + ``rel2idx``)."""
+        from relgat_projector.handlers.wiazka_checkpoint import save_checkpoint
+
+        return save_checkpoint(ckpt_dir, self.model, self.rel2idx,
+                               config=config, commutation=commutation)
+
+    def commutation(self) -> Optional[torch.Tensor]:
+        """Learned commutation matrix ``C_rs`` of the *training* loss, if attached."""
+        loss = getattr(self, "curvature_loss", None)
+        return loss.commutation() if loss is not None else None
 
     # ----------------------------------------------------------------- names
     def _resolve(self, rel_id: Union[int, str]) -> int:

@@ -136,6 +136,13 @@ class WiazkaModel(nn.Module):
 
         self.use_applicability = use_applicability
         self.use_decoder = use_decoder
+        self._ctor = {
+            "gat_num_layers": max(1, gat_num_layers),
+            "gat_heads": gat_heads,
+            "dropout": dropout,
+            "use_applicability": use_applicability,
+            "use_decoder": use_decoder,
+        }
         if use_applicability:
             self.applicability = ApplicabilityHead(D, num_rel)
         if use_decoder:
@@ -182,3 +189,51 @@ class WiazkaModel(nn.Module):
         if not self.use_decoder:
             raise RuntimeError("decoder disabled")
         return self.decoder.decode(x, y)
+
+    # ------------------------------------------------------------ (de)serialisation
+    def spec(self) -> dict:
+        """Everything needed to rebuild this exact model (checkpoint metadata)."""
+        return {
+            "base_dim": self.base_dim,
+            "num_rel": self.num_rel,
+            "operator": getattr(self.operator, "ctor_kwargs", None),
+            **self._ctor,
+        }
+
+    @classmethod
+    def from_spec(cls, spec: dict, node_emb: torch.Tensor | None = None,
+                  edge_index: torch.Tensor | None = None,
+                  edge_type: torch.Tensor | None = None,
+                  operator=None) -> "WiazkaModel":
+        """Rebuild a model from :meth:`spec`.
+
+        ``node_emb`` / ``edge_index`` are *structure*, not weights: when they
+        are not supplied the checkpoint buffers (saved in the state dict) are
+        re-created with placeholder shapes taken from the checkpoint, so that
+        ``load_state_dict`` restores the real graph afterwards.
+        """
+        from relgat_projector.core.operator import build_operator
+
+        op_spec = spec["operator"]
+        if operator is None:
+            if not op_spec:
+                raise ValueError("spec has no operator construction information")
+            operator = build_operator(op_spec["type"], **op_spec["kwargs"])
+        if node_emb is None:
+            node_emb = torch.zeros(0, int(spec["base_dim"]))
+        if edge_index is None:
+            edge_index = torch.empty(2, 0, dtype=torch.long)
+        if edge_type is None:
+            edge_type = torch.empty(0, dtype=torch.long)
+        return cls(
+            node_emb=node_emb,
+            edge_index=edge_index,
+            edge_type=edge_type,
+            num_rel=int(spec["num_rel"]),
+            operator=operator,
+            gat_num_layers=int(spec.get("gat_num_layers", 2)),
+            gat_heads=int(spec.get("gat_heads", 2)),
+            dropout=float(spec.get("dropout", 0.1)),
+            use_applicability=bool(spec.get("use_applicability", True)),
+            use_decoder=bool(spec.get("use_decoder", True)),
+        )

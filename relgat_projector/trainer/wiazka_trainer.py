@@ -11,6 +11,7 @@ that the plwordnet-milvus exporter produces.
 from __future__ import annotations
 
 import random
+import dataclasses
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -53,11 +54,16 @@ class WiazkaConfig:
     batch_size: int = 64
     num_neg: int = 8
     epochs: int = 1
+    #: fraction of edges used for training (topology + supervision);
+    #: the rest is held out and never seen by the GAT (PLAN.md 6.6)
+    train_ratio: float = 1.0
     device: str = "cpu"
     seed: int = 42
     # number of shadow vectors synthesised when none are supplied (PLAN.md 2.6)
     num_shadow: int = 512
     shadow_jitter: float = 0.35
+    # F4: shadow vectors drawn per step (PLAN.md 2.6)
+    shadow_batch: int = 64
 
 
 def _build_adjacency(
@@ -103,6 +109,21 @@ class WiazkaTrainer:
             for (s, d, r) in edges
             if s in self.id2idx and d in self.id2idx and r in self.rel2idx
         ]
+        # PLAN.md 6.6: the GAT topology and the supervised edges must be an
+        # explicit, reproducible split -- otherwise held-out edges leak into
+        # message passing and every "eval" metric is measured on training data.
+        self.eval_edges: List[Tuple[int, int, int]] = []
+        ratio = float(self.cfg.train_ratio)
+        if not 0.0 < ratio <= 1.0:
+            raise ValueError(f"train_ratio must be in (0, 1], got {ratio}")
+        if ratio < 1.0 and len(self.edges) > 1:
+            self.edges, self.eval_edges = self._split_edges(ratio)
+            print(
+                f"[split] train edges={len(self.edges)} "
+                f"held-out edges={len(self.eval_edges)}"
+            )
+        self.topology_endpoint_coverage = self._coverage_report()
+
         src = torch.tensor([e[0] for e in self.edges], dtype=torch.long)
         dst = torch.tensor([e[1] for e in self.edges], dtype=torch.long)
         et = torch.tensor([e[2] for e in self.edges], dtype=torch.long)
@@ -193,8 +214,45 @@ class WiazkaTrainer:
             params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
         )
         self.stage_manager = StageManager()
+        self.history: List[Dict] = []
+        # F4 turns on base-point-dependent transport (PLAN.md 1.3):
+        # theta(r, x) = theta_r + eps * P(relu(W x)); eps starts at 0
+        # so the operator stays exactly invertible until context is earned.
+        self.operator.enable_context(self.stage_manager.stage().enable_context)
 
     # ------------------------------------------------------------- sampling
+    def _split_edges(self, ratio: float):
+        """Deterministic, triplet-disjoint train/holdout split of the edges.
+
+        Splits on *positions* of the edge list, so when the graph contains
+        duplicate ``(src, dst, rel)`` triplets (multi-graph semantics) no
+        position is used for training and held out at the same time.
+        """
+        order = list(range(len(self.edges)))
+        random.Random(self.cfg.seed).shuffle(order)
+        n_train = max(1, int(round(ratio * len(order))))
+        train_ids, eval_ids = set(order[:n_train]), set(order[n_train:])
+        train, eval_ = [], []
+        for i in range(len(self.edges)):
+            (train if i in train_ids else eval_).append(self.edges[i])
+        return train, eval_
+
+    def _coverage_report(self) -> float:
+        """Share of held-out edges whose endpoints exist in the GAT topology."""
+        if not self.eval_edges:
+            return 1.0
+        nodes = set()
+        for s, d, _ in self.edges:
+            nodes.add(s)
+            nodes.add(d)
+        # held-out endpoints are *not* topology; exclude them from coverage
+        nodes -= {s for s, _, _ in self.eval_edges}
+        nodes -= {d for _, d, _ in self.eval_edges}
+        visible = sum(1 for s, d, _ in self.eval_edges if s in nodes and d in nodes)
+        coverage = visible / max(1, len(self.eval_edges))
+        print(f"[split] held-out edges reachable in topology: {coverage:.1%}")
+        return coverage
+
     def _sample_edges(self, batch_size: int):
         idx = torch.randint(0, len(self.edges), (batch_size,))
         e = torch.tensor(self.edges, dtype=torch.long)
@@ -318,7 +376,7 @@ class WiazkaTrainer:
 
         if self.stage_manager.is_active("L_shadow"):
             # cycle + commutation consistency OFF the graph (PLAN.md 2.6)
-            z_base = self._shadow_cache[: min(64, self._shadow_cache.shape[0])]
+            z_base = self._shadow_cache[: min(self.cfg.shadow_batch, self._shadow_cache.shape[0])]
             z = self.model.base_to_op(z_base)
             r_sh = torch.randint(0, self.num_rel, (z.shape[0],), device=device)
             back = self.model.inverse(self.model.apply(z, r_sh), r_sh)
@@ -371,6 +429,7 @@ class WiazkaTrainer:
     def train(self, epochs: Optional[int] = None, log_every: int = 50) -> List[Dict]:
         epochs = epochs or self.cfg.epochs
         history: List[Dict] = []
+        self.history = history
         self.model.train()
         global_step = 0
         for epoch in range(1, epochs + 1):
@@ -417,6 +476,27 @@ class WiazkaTrainer:
                 self.stage_manager.advance()
         return history
 
+    # ---------------------------------------------------------------- storage
+    def save(self, ckpt_dir: str, metrics: Optional[Dict[str, float]] = None) -> str:
+        """Persist model + config + the learned commutation matrix C_rs."""
+        from relgat_projector.handlers.wiazka_checkpoint import save_checkpoint
+
+        history = getattr(self, "history", None) or []
+        last = history[-1] if history else None
+        return save_checkpoint(
+            ckpt_dir,
+            self.model,
+            self.rel2idx,
+            config={
+                **dataclasses.asdict(self.cfg),
+                "num_nodes": self.num_nodes,
+                "num_edges": len(self.edges),
+                "stage": self.stage_manager.order[self.stage_manager.current],
+            },
+            commutation=self.curvature_loss.commutation(),
+            metrics=metrics if metrics is not None else last,
+        )
+
     # ---------------------------------------------------------------- eval
     @torch.no_grad()
     def evaluate(self, n_probe: int = 256) -> Dict[str, float]:
@@ -425,8 +505,10 @@ class WiazkaTrainer:
         self.model.eval()
         refined = self.model.refine()
         device = self.cfg.device
-        probe = torch.randint(0, len(self.edges), (n_probe,))
-        e = torch.tensor(self.edges, dtype=torch.long)[probe].to(device)
+        # held-out edges when available: gates must not fire on training data
+        scored = self.eval_edges if self.eval_edges else self.edges
+        probe = torch.randint(0, len(scored), (min(n_probe, len(scored)),))
+        e = torch.tensor(scored, dtype=torch.long)[probe].to(device)
         src, dst, rel = e[:, 0], e[:, 1], e[:, 2]
         x_a = refined[src]
         x_b = refined[dst]

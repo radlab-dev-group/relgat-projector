@@ -116,9 +116,26 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
             self.log_eps = nn.Parameter(torch.tensor(-6.0))
             nn.init.zeros_(self.ctx_P.weight)
         else:
+            self.ctx_W = None
+            self.ctx_P = None
             self.log_eps = None
 
         self._expm_cache: dict[tuple, torch.Tensor] = {}
+        #: enough to rebuild this exact operator from a checkpoint
+        self.ctor_kwargs: dict = {
+            "type": "givens",
+            "kwargs": {
+                "dim": dim,
+                "num_rel": num_rel,
+                "num_generators": num_generators,
+                "learn_basis": learn_basis,
+                "use_scale": use_scale,
+                "use_context": use_context,
+                "context_hidden": context_hidden,
+                "init_angle_scale": init_angle_scale,
+                "expm_cache": expm_cache,
+            },
+        }
 
     # ------------------------------------------------------------- properties
     @property
@@ -135,7 +152,36 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
 
     @property
     def eps(self) -> float:
-        return float(self.log_eps.exp()) if self.log_eps is not None else 0.0
+        return float(self.log_eps.exp().detach()) if self.log_eps is not None else 0.0
+
+    # ------------------------------------------------------------ context
+    def enable_context(self, enabled: bool) -> None:
+        """(Re)enable base-point-dependent transport (PLAN.md 1.3).
+
+        Called by the stage manager when F4 starts: the hyper-network
+        ``theta(r, x) = theta_r + eps * P(relu(W x))`` is created at this
+        point (``eps`` starts near 0 so transport stays exactly invertible
+        until context is earned).  Disabling removes the parameters so the
+        checkpoint does not carry dead state.
+        """
+        enabled = bool(enabled)
+        if enabled == self.use_context:
+            return
+        self.use_context = enabled
+        if enabled:
+            self.ctx_W = nn.Linear(self._dim, 64, bias=False)
+            self.ctx_P = nn.Linear(64, self._num_gen, bias=False)
+            self.log_eps = nn.Parameter(torch.tensor(-6.0))
+            nn.init.zeros_(self.ctx_P.weight)
+        else:
+            del self.ctx_W
+            del self.ctx_P
+            del self.log_eps
+            self.ctx_W = None
+            self.ctx_P = None
+            self.log_eps = None
+        self.ctor_kwargs["kwargs"]["use_context"] = enabled
+        self._expm_cache.clear()
 
     # ------------------------------------------------------------ matrix ops
     def _omega(self, theta: torch.Tensor) -> torch.Tensor:
@@ -155,7 +201,7 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
     ) -> torch.Tensor:
         """Full rotation matrices ``[B, D, D]`` for the given relation ids."""
         theta = self.theta[rel_ids]  # [B, K]
-        if self.use_context and x is not None:
+        if self.use_context and x is not None and self.ctx_W is not None:
             theta = theta + self.eps * self.ctx_P(torch.relu(self.ctx_W(x)))
         omega = self._omega(theta)  # [B, D, D]
         return self._rotation_matrix(omega)
@@ -180,7 +226,7 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
         # dial: scale the rotation by lambda (expm(lambda * Omega) approximated
         # by the Cayley transform of lambda * Omega), and the scale by s^lambda
         theta = self.theta[rel_ids]
-        if self.use_context:
+        if self.use_context and self.ctx_W is not None:
             theta = theta + self.eps * self.ctx_P(torch.relu(self.ctx_W(x)))
         omega = self._omega(theta) * lambdas.unsqueeze(-1).unsqueeze(-1)  # [B,D,D]
         rot = self._rotation_matrix(omega)  # [B, D, D]

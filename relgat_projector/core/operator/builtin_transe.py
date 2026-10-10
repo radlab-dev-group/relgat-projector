@@ -22,6 +22,10 @@ class TransEOperator(nn.Module, RelationalOperator):
         self.normalize = normalize
         self.rel_emb = nn.Embedding(num_rel, dim)
         nn.init.xavier_uniform_(self.rel_emb.weight)
+        self.ctor_kwargs: dict = {
+            "type": "transe",
+            "kwargs": {"dim": dim, "num_rel": num_rel, "normalize": normalize},
+        }
 
     @property
     def dim(self) -> int:
@@ -38,16 +42,20 @@ class TransEOperator(nn.Module, RelationalOperator):
         lambdas: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r = self.rel_emb(rel_ids)
-        if lambdas is not None:
-            r = r * lambdas.unsqueeze(-1)
         if self.normalize:
-            return torch.nn.functional.normalize(x + r, p=2, dim=-1)
-        return x + r
+            # translate along a unit direction; re-projecting x + r onto the
+            # sphere would break the isometry this operator claims
+            r = torch.nn.functional.normalize(r, p=2, dim=-1)
+        out = x + r
+        if lambdas is not None:
+            lam = lambdas.reshape(-1, 1)
+            out = (1.0 - lam) * x + lam * out
+        return out
 
     def inverse(self, x: torch.Tensor, rel_ids: torch.Tensor) -> torch.Tensor:
         r = self.rel_emb(rel_ids)
         if self.normalize:
-            return torch.nn.functional.normalize(x - r, p=2, dim=-1)
+            r = torch.nn.functional.normalize(r, p=2, dim=-1)
         return x - r
 
     def score(
