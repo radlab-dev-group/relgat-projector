@@ -215,12 +215,33 @@ class WiazkaTrainer:
         )
         self.stage_manager = StageManager()
         self.history: List[Dict] = []
-        # F4 turns on base-point-dependent transport (PLAN.md 1.3):
-        # theta(r, x) = theta_r + eps * P(relu(W x)); eps starts at 0
-        # so the operator stays exactly invertible until context is earned.
-        self.operator.enable_context(self.stage_manager.stage().enable_context)
+        self._sync_stage_state()
 
     # ------------------------------------------------------------- sampling
+    def _sync_stage_state(self) -> None:
+        """Apply the current stage's structural switches to operator + optimizer.
+
+        F4 turns on base-point-dependent transport (PLAN.md 1.3):
+        ``theta(r, x) = theta_r + eps * P(relu(W x))``.  The hyper-network is
+        created *at that moment*, so its parameters have to be registered with
+        the optimizer as well -- otherwise context would exist but never train.
+        """
+        wanted = self.stage_manager.stage().enable_context
+        enable = getattr(self.operator, "enable_context", None)
+        if enable is not None and bool(self.operator.use_context) != wanted:
+            enable(wanted)
+        known = {
+            id(p)
+            for group in self.optimizer.param_groups
+            for p in group["params"]
+        }
+        fresh = [
+            p for p in self.model.parameters()
+            if p.requires_grad and id(p) not in known
+        ]
+        if fresh:
+            self.optimizer.add_param_group({"params": fresh})
+
     def _split_edges(self, ratio: float):
         """Deterministic, triplet-disjoint train/holdout split of the edges.
 
@@ -245,9 +266,6 @@ class WiazkaTrainer:
         for s, d, _ in self.edges:
             nodes.add(s)
             nodes.add(d)
-        # held-out endpoints are *not* topology; exclude them from coverage
-        nodes -= {s for s, _, _ in self.eval_edges}
-        nodes -= {d for _, d, _ in self.eval_edges}
         visible = sum(1 for s, d, _ in self.eval_edges if s in nodes and d in nodes)
         coverage = visible / max(1, len(self.eval_edges))
         print(f"[split] held-out edges reachable in topology: {coverage:.1%}")
@@ -474,6 +492,7 @@ class WiazkaTrainer:
                     f" -> gate passed, advancing"
                 )
                 self.stage_manager.advance()
+                self._sync_stage_state()
         return history
 
     # ---------------------------------------------------------------- storage

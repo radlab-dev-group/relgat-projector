@@ -143,3 +143,53 @@ def test_topology_split_excludes_heldout_from_gat():
     # held out simultaneously
     assert len(trainer.edges) + len(trainer.eval_edges) == n_in
     assert 0.0 <= trainer.topology_endpoint_coverage <= 1.0
+
+
+def test_f4_context_parameters_reach_the_optimizer():
+    """Switching to F4 creates the context hyper-network late.
+
+    Parameters created after the optimizer do not join it implicitly, so the
+    trainer has to register them -- otherwise F4 context is dead weight that
+    never moves from its initialisation.
+    """
+    trainer, _ = _trainer()
+    trainer.stage_manager.current = len(trainer.stage_manager.order) - 1
+    trainer._sync_stage_state()
+    assert trainer.operator.use_context is True
+    opt_ids = {
+        id(p) for g in trainer.optimizer.param_groups for p in g["params"]
+    }
+    for name, param in trainer.model.named_parameters():
+        assert id(param) in opt_ids, f"{name} is not optimised after F4"
+
+
+def test_disabling_context_removes_parameters():
+    trainer, _ = _trainer()
+    trainer.stage_manager.current = len(trainer.stage_manager.order) - 1
+    trainer._sync_stage_state()
+    with_ctx = dict(trainer.model.named_parameters()).keys()
+    assert any("ctx_" in n for n in with_ctx)
+    trainer.stage_manager.current = 0
+    trainer._sync_stage_state()
+    assert not any("ctx_" in n for n, _ in trainer.model.named_parameters())
+
+
+def test_checkpoint_roundtrip_with_context(tmp_path):
+    """F4 checkpoints carry the context hyper-network; they must reload too."""
+    trainer, rel2idx = _trainer()
+    trainer.stage_manager.current = len(trainer.stage_manager.order) - 1
+    trainer._sync_stage_state()
+    trainer.train(epochs=1, log_every=10_000)
+
+    ckpt = str(tmp_path / "ctx")
+    trainer.save(ckpt)
+    reloaded = RelationFlow.load(ckpt)
+    assert reloaded.meta["model_spec"]["operator"]["kwargs"]["use_context"] is True
+
+    base = torch.randn(3, 16)
+    v, v_ = trainer.model.base_to_op(base), reloaded.refine(base)
+    assert torch.allclose(
+        trainer.model.apply(v, torch.zeros(3, dtype=torch.long)),
+        reloaded.apply(v_, "r0"),
+        atol=1e-5,
+    )
