@@ -90,15 +90,35 @@ def test_loss_owned_parameters_are_optimised():
 def test_stage_manager_direction_of_better():
     from relgat_projector.trainer.stages import StageManager
 
+    # F2 gate: lower-is-better metrics (cce, isot)
     mgr = StageManager()
-    # CCE is lower-is-better: a small value must advance the stage
     mgr.current = 1
-    assert mgr.should_stop({"eval/cce": 1e-6}) is True
+    assert mgr.should_stop({"eval/cce": 1e-6, "eval/isot": 0.0}) is True
     mgr2 = StageManager()
     mgr2.current = 1
-    assert mgr2.should_stop({"eval/cce": 0.9}) is False
-    # cos_edge is higher-is-better
+    assert mgr2.should_stop({"eval/cce": 0.9, "eval/isot": 0.0}) is False
+    # F1 gate: the anchor is higher-is-better
     mgr3 = StageManager()
     mgr3.current = 0
-    assert mgr3.should_stop({"eval/cos_edge": 0.99}) is True
-    assert StageManager().should_stop({"eval/cos_edge": 0.1}) is False
+    assert mgr3.should_stop({"eval/anchor": 0.99}) is True
+    assert StageManager().should_stop({"eval/anchor": 0.1}) is False
+
+
+def test_stage_gate_requires_every_metric():
+    """One trivially-satisfied metric must not open the gate.
+
+    ``eval/cce`` is ~0 everywhere for an exactly invertible operator, so an
+    any-metric rule let F2 advance after a single evaluation.
+    """
+    from relgat_projector.trainer.stages import StageManager
+
+    mgr = StageManager()
+    mgr.current = 1
+    assert mgr.should_stop({"eval/cce": 0.0}) is False, "cce alone opened F2"
+    # metrics that are not part of the gate are ignored
+    assert mgr.should_stop({"eval/cce": 0.0, "eval/isot": 0.01,
+                            "eval/cos_edge": -1.0}) is True
+    # a metric that was never computed cannot open the gate either
+    mgr2 = StageManager()
+    mgr2.current = 1
+    assert mgr2.should_stop({"eval/cce": 0.001}) is False

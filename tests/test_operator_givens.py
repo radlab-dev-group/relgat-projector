@@ -116,3 +116,38 @@ def test_apply_to_matrix(op):
     a = op.apply(x, torch.full((24,), 3))
     b = op.apply_to_matrix(x, 3)
     assert torch.allclose(a, b)
+
+
+def test_basis_stays_skew_under_gradient_steps():
+    """The generator basis must remain in so(D) no matter where gradients go.
+
+    The stored tensor is raw; skewness is enforced by the ``basis`` property.
+    Without the projection the learned basis drifts out of the Lie algebra and
+    the operator silently stops being a rotation (measured ISOT ~ 4e-2).
+    """
+    import torch
+
+    torch.manual_seed(0)
+    from relgat_projector.core.operator import build_operator
+
+    op = build_operator("givens", dim=16, num_rel=4, num_generators=6)
+    opt = torch.optim.SGD(op.parameters(), lr=0.5)
+    x = torch.randn(8, 16)
+    rel = torch.randint(0, 4, (8,))
+    for _ in range(50):
+        loss = op.apply(x, rel).pow(2).mean()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    b = op.basis
+    assert torch.allclose(b, -b.transpose(-1, -2), atol=1e-5), \
+        "learned basis is no longer skew-symmetric"
+
+    # and the operator must still be (near-)orthogonal: cosine preserving
+    u = torch.randn(64, 16)
+    v = torch.randn(64, 16)
+    tu = op.apply(u, torch.full((64,), 1, dtype=torch.long))
+    tv = op.apply(v, torch.full((64,), 1, dtype=torch.long))
+    ci = torch.nn.functional.cosine_similarity(u, v, dim=-1)
+    co = torch.nn.functional.cosine_similarity(tu, tv, dim=-1)
+    assert (ci - co).abs().max() < 1e-4, "operator no longer preserves cosines"
