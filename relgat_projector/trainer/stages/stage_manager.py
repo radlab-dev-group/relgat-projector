@@ -73,6 +73,7 @@ STAGE_ORDER = ["F1_nodes", "F2_relations", "F3_composition", "F4_shadows"]
 LOWER_IS_BETTER = {
     "eval/cce": True,
     "eval/isot": True,
+    "eval/anchor": False,
     "eval/pce_k1": True,
     "eval/pce_k2": True,
     "eval/pce_k3": True,
@@ -80,9 +81,13 @@ LOWER_IS_BETTER = {
 }
 
 DEFAULT_GATES: Dict[str, Dict[str, float]] = {
-    # stage -> {metric: threshold} (PLAN.md section 4)
-    "F1_nodes": {"eval/cos_edge": 0.9},
-    "F2_relations": {"eval/cce": 0.02},
+    # stage -> {metric: threshold}; ALL listed metrics must pass
+    # (PLAN.md section 4).  F1 is gated on the *anchor* -- refinement must stay
+    # near the base embedding -- and NOT on cos_edge: relations such as
+    # antonymy deliberately connect dissimilar nodes, so a cosine-over-edges
+    # gate is unattainable at a stage where the operator is still frozen.
+    "F1_nodes": {"eval/anchor": 0.9},
+    "F2_relations": {"eval/cce": 0.02, "eval/isot": 0.05},
     "F3_composition": {"eval/pce_k2": 0.10},
 }
 
@@ -110,21 +115,32 @@ class StageManager:
         self.steps_in_stage += 1
 
     def should_stop(self, metrics: Dict[str, float]) -> bool:
-        """Return True when the current stage's gate is passed (advance)."""
+        """True when the stage may be left: every gate metric passes.
+
+        A single easy metric must not open the gate -- ``eval/cce`` sits at ~0
+        for an exactly invertible operator at *every* stage, so an
+        any-metric rule let F2 advance after one evaluation.  Metrics that were
+        never computed are skipped (they cannot block progress), and
+        ``max_steps`` remains the safety valve.
+        """
         cfg = self.stage()
         if self.steps_in_stage >= cfg.max_steps:
             return self.current < len(self.order) - 1
-        for metric, threshold in self.gates.get(self.order[self.current], {}).items():
+        gate = self.gates.get(self.order[self.current], {})
+        if not gate:
+            return False
+        # every gate metric must be *present* and pass; a missing metric means
+        # "not yet demonstrated", never "good enough".  (The safety valve above
+        # already guarantees progress when a metric is structurally absent.)
+        for metric, threshold in gate.items():
             value = metrics.get(metric)
             if value is None:
-                continue
+                return False
             lower_better = LOWER_IS_BETTER.get(metric, False)
-            if lower_better:
-                if value <= threshold:
-                    return self.current < len(self.order) - 1
-            elif value >= threshold:
-                return self.current < len(self.order) - 1
-        return False
+            ok = value <= threshold if lower_better else value >= threshold
+            if not ok:
+                return False
+        return self.current < len(self.order) - 1
 
     def is_active(self, loss_name: str) -> bool:
         return loss_name in self.stage().active
