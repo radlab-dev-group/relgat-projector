@@ -94,13 +94,18 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
         self.use_context = use_context
         self.expm_cache = expm_cache
 
-        # Generator basis B_m, [K, D, D] (skew-symmetric).
+        # Generator basis B_m, [K, D, D], skew-symmetric *by construction*:
+        # the stored tensor is an unconstrained raw matrix and B = (R - R^T)/2
+        # is what every consumer sees.  Keeping the raw tensor learnable without
+        # this projection lets gradients drift the basis out of so(D), which
+        # silently destroys the three headline properties (orthogonality, exact
+        # inverse, cosine preservation) -- measured ISOT was ~4e-2 after a few
+        # hundred steps, where it must be ~1e-7.
+        raw = _random_skew_basis(dim, num_generators)
         if learn_basis:
-            self.basis = nn.Parameter(
-                _random_skew_basis(dim, num_generators)
-            )
+            self.basis_raw = nn.Parameter(raw)
         else:
-            self.register_buffer("basis", _random_skew_basis(dim, num_generators))
+            self.register_buffer("basis_raw", raw)
 
         # Relation coordinates: theta_{r,m} and log s_r.
         self.theta = nn.Parameter(torch.randn(num_rel, num_generators) * init_angle_scale)
@@ -149,6 +154,12 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
     @property
     def num_generators(self) -> int:
         return self._num_gen
+
+    @property
+    def basis(self) -> torch.Tensor:
+        """The skew-symmetric generators ``[K, D, D]`` (exact by projection)."""
+        r = self.basis_raw
+        return 0.5 * (r - r.transpose(-1, -2))
 
     @property
     def eps(self) -> float:

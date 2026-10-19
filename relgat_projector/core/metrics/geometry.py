@@ -64,6 +64,8 @@ def cycle_closure_error(operator, x: torch.Tensor, rel_ids: torch.Tensor) -> flo
 def isometry_error(
     operator, u: torch.Tensor, v: torch.Tensor, rel_id: int | torch.Tensor
 ) -> float:
+    if not isinstance(rel_id, torch.Tensor):
+        rel_id = torch.tensor(int(rel_id), device=u.device)
     ru = operator.apply(u, rel_id)
     rv = operator.apply(v, rel_id)
     cos_in = torch.nn.functional.cosine_similarity(u, v, dim=-1)

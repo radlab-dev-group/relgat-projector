@@ -44,6 +44,13 @@ class TransportGATLayer(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
         self.act = nn.GELU()
+        # gated residual: the refinement starts as the *identity* (tanh(0)=0)
+        # and may only move as far as its gate opens.  An ungated residual with
+        # LayerNorm/GELU on the node path lets the refinement collapse
+        # neighbouring nodes into one blob and the operator to learn the
+        # identity -- a degenerate optimum with a good edge cosine and no
+        # relation at all (measured: refined cos 0.96 on *every* edge type).
+        self.gate = nn.Parameter(torch.zeros(1))
 
     def forward(
         self,
@@ -71,10 +78,11 @@ class TransportGATLayer(nn.Module):
 
         # fold heads back to out_dim
         out = out.view(N, self.heads, self.out_dim).mean(dim=1)
-        # residual + norm (stabilises deep stacking, keeps anchor)
-        out = self.act(refined + out)
-        out = F.layer_norm(out, (self.out_dim,))
-        return self.dropout(out)
+        # non-linearity on the *update*, never on the node representation:
+        # GELU/LayerNorm applied to the node vector destroys its cosine
+        # geometry with the base embedding (and with it the retriever space)
+        update = self.act(self.dropout(out))
+        return refined + torch.tanh(self.gate) * update
 
 
 class WiazkaModel(nn.Module):
@@ -133,6 +141,15 @@ class WiazkaModel(nn.Module):
             else nn.Identity()
         )
         self.base_dim = node_emb.size(1)
+        # a small gate (tanh, starts at 0) keeps the export a controlled
+        # deformation of the base space: the vector database holds *base*
+        # vectors, and a large learned linear map would move an exported query
+        # far from every index entry, destroying cosine search.  The export is
+        # base + g * Linear(x - base) in the common case where base_to_op is
+        # the identity; otherwise it is base + g * Linear(x) projected back.
+        self.export_gate = nn.Parameter(torch.zeros(1))
+        self.export_proj = nn.Linear(D, node_emb.size(1), bias=False)
+        nn.init.zeros_(self.export_proj.weight)
 
         self.use_applicability = use_applicability
         self.use_decoder = use_decoder
@@ -182,7 +199,19 @@ class WiazkaModel(nn.Module):
         return self.applicability.score(x, rel_ids)
 
     def to_retriever_space(self, x: torch.Tensor) -> torch.Tensor:
-        """Export operator-space vectors into the base (retriever) space."""
+        """Export operator-space vectors into the base (retriever) space.
+
+        The base vectors are what the vector database actually holds, so the
+        export is anchored to the base space: ``base + g * (P(x) - base)``
+        where ``base`` is the *base embedding of the same node* when the input
+        carries one (node vectors), and the origin otherwise.  ``g`` starts at
+        0 (export = base) and opens only if it helps the export losses.
+        """
+        g = torch.tanh(self.export_gate)
+        if x.shape[0] == self.node_emb_fixed.shape[0]:
+            base = self.node_emb_fixed
+            # row alignment: caller passes the full node matrix in order
+            return base + g * (self.to_retriever(x) - base)
         return self.to_retriever(x)
 
     def decode(self, x: torch.Tensor, y: torch.Tensor):
