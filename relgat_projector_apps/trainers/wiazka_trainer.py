@@ -76,6 +76,16 @@ def get_args() -> argparse.Namespace:
                         help="shadow vectors synthesised when none are supplied")
     parser.add_argument("--shadow-jitter", type=float, default=0.35)
 
+    # query rewriting validation (PLAN.md 5, QR-Recall)
+    parser.add_argument("--qr-relations", type=str, default=None,
+                        help="comma-separated relations to validate with "
+                             "QR-Recall, e.g. 'syn,ant'")
+    parser.add_argument("--qr-ks", type=str, default="1,5,10")
+    parser.add_argument("--qr-max-queries", type=int, default=512)
+    parser.add_argument("--qr-train", action="store_true",
+                        help="evaluate QR-Recall on training edges instead of "
+                             "the held-out set (for debugging only)")
+
     # output
     parser.add_argument("--save-dir", type=str, required=True)
     parser.add_argument("--report", type=str, default=None,
@@ -94,6 +104,22 @@ def _fmt_metrics(history) -> str:
         for k in sorted(keep)
     ]
     return "\n".join(lines)
+
+
+def _print_qr(qr, ks) -> None:
+    for name, row in qr.items():
+        if not row or row.get("n_queries", 0) == 0:
+            print(f"  {name}: no gold pairs in the scored set")
+            continue
+        print(f"  relation {name} (n={int(row['n_queries'])})")
+        print(f"  {'':<15}" + "".join(f"@{k:<6}" for k in ks))
+        for label, key in (("recall before", "recall_before@"),
+                           ("recall after", "recall_after@"),
+                           ("delta", "delta_recall@")):
+            print(f"  {label:<15}" + "".join(
+                f"{row.get(key + str(k), float('nan')):<6.2f}" for k in ks))
+        print(f"  MRR before={row['mrr_before']:.3f} "
+              f"after={row['mrr_after']:.3f}")
 
 
 def main() -> None:
@@ -135,6 +161,19 @@ def main() -> None:
     print("\n=== final evaluation ===")
     print(_fmt_metrics([metrics]))
 
+    qr = None
+    if args.qr_relations:
+        rels = [r.strip() for r in args.qr_relations.split(",") if r.strip()]
+        ks = tuple(int(k) for k in args.qr_ks.split(",") if k.strip())
+        print("\n=== query rewriting (QR-Recall) ===")
+        qr = trainer.qr_eval(
+            rels,
+            ks=ks,
+            max_queries=args.qr_max_queries,
+            use_heldout=not args.qr_train,
+        )
+        _print_qr(qr, ks)
+
     ckpt = trainer.save(args.save_dir, metrics=metrics)
 
     commutation = trainer.curvature_loss.commutation().detach().cpu()
@@ -161,6 +200,7 @@ def main() -> None:
             for j in range(len(names))
         },
         "checkpoint": ckpt,
+        "qr_recall": qr,
     }
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)

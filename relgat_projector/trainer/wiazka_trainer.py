@@ -516,6 +516,57 @@ class WiazkaTrainer:
             metrics=metrics if metrics is not None else last,
         )
 
+    # ------------------------------------------------------ query rewriting
+    @torch.no_grad()
+    def qr_eval(
+        self,
+        rel_names: List[str],
+        ks: Tuple[int, ...] = (1, 5, 10),
+        max_queries: int = 256,
+        use_heldout: bool = True,
+        filter_others: bool = True,
+    ) -> Dict[str, Dict[str, float]]:
+        """QR-Recall: does `T_r` actually improve retrieval of the gold answer?
+
+        Evaluated the way the feature is used in production: the index is the
+        base (retriever) embeddings -- what the vector database really holds --
+        and a query is rewritten by
+        ``to_retriever(T_r(base_to_op(x)))``.  Recall is compared with the
+        untransformed query, so a relation that only looks good geometrically
+        but does not help retrieval is exposed.  Scored on held-out edges when
+        they exist (PLAN.md 5).
+        """
+        from relgat_projector.core.metrics.query_rewriting import gold_pairs, qr_recall
+
+        scored = self.eval_edges if (use_heldout and self.eval_edges) else self.edges
+        index = self.node_emb.to(self.cfg.device)
+        gen = torch.Generator().manual_seed(self.cfg.seed)
+        out: Dict[str, Dict[str, float]] = {}
+        for name in rel_names:
+            if name not in self.rel2idx:
+                raise KeyError(f"unknown relation {name!r}")
+            rid = self.rel2idx[name]
+            # edges already reference rows of self.node_emb
+            pairs = gold_pairs(scored, rid, max_queries, gen)
+            if not pairs:
+                out[name] = {"relation": name, "n_queries": 0.0}
+                continue
+            result = qr_recall(
+                pairs,
+                index,
+                transform=lambda x, rid=rid: self.model.to_retriever_space(
+                    self.model.apply(self.model.base_to_op(x),
+                                     torch.full((x.shape[0],), rid,
+                                                dtype=torch.long, device=index.device))
+                ),
+                ks=ks,
+                filter_others=filter_others,
+                relation=name,
+                chain=(rid,),
+            )
+            out[name] = result.as_dict()
+        return out
+
     # ---------------------------------------------------------------- eval
     @torch.no_grad()
     def evaluate(self, n_probe: int = 256) -> Dict[str, float]:
@@ -533,8 +584,15 @@ class WiazkaTrainer:
         x_b = refined[dst]
         transformed = self.model.apply(x_a, rel)
         cos = torch.nn.functional.cosine_similarity(transformed, x_b, dim=-1)
+        base = self.model.base_to_op(self.model.node_emb_fixed)
         out: Dict[str, float] = {
             "eval/cos_edge": float(cos.mean().item()),
+            # refinement must stay near the base embedding (F1 gate, PLAN 4)
+            "eval/anchor": float(
+                torch.nn.functional.cosine_similarity(
+                    refined, base, dim=-1
+                ).mean().item()
+            ),
             "eval/cce": geometry.cycle_closure_error(
                 self.model.operator, x_a, rel
             ),
