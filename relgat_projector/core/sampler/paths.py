@@ -54,6 +54,10 @@ class PathSampler:
     def _pick_depth(self) -> int:
         return int(self.rng.choices(self._depths, weights=self.depth_weights.tolist())[0])
 
+    def pick_depth(self) -> int:
+        """Sample a chain length the same way :meth:`sample` would."""
+        return self._pick_depth()
+
     def sample(self) -> Optional[Tuple[int, List[int], int]]:
         """One random walk of length in [2, max_depth]."""
         start = self.rng.randrange(self.num_nodes)
@@ -81,14 +85,26 @@ class PathSampler:
             return None
         return start, [r for _, r in chain], node
 
-    def sample_batch(self, batch_size: int) -> List[Tuple[int, List[int], int]]:
+    def sample_batch(
+        self, batch_size: int, depth: Optional[int] = None
+    ) -> List[Tuple[int, List[int], int]]:
+        """Up to ``batch_size`` walks, optionally all of exactly ``depth``.
+
+        A fixed depth lets a training batch be stacked into ``[B, k]`` *without
+        padding*: a padded row would apply relation id 0 (``Pertainym`` in the
+        Słowosieć export) once per pad slot on top of the real chain, while the
+        supervision target is the end of the unpadded chain.
+        """
         out = []
         tries = 0
         while len(out) < batch_size and tries < batch_size * 50:
             tries += 1
             p = self.sample()
-            if p is not None:
-                out.append(p)
+            if p is None:
+                continue
+            if depth is not None and len(p[1]) != int(depth):
+                continue
+            out.append(p)
         return out
 
 
