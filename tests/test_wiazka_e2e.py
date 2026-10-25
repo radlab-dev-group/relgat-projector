@@ -87,21 +87,30 @@ def test_loss_owned_parameters_are_optimised():
         assert id(p) in opt_ids, "C_rs is not optimised by the trainer"
 
 
+def _past_min_steps(mgr, stage_index):
+    """Put the manager in `stage_index` with its minimum steps already spent."""
+    from relgat_projector.trainer.stages.stage_manager import STAGES
+
+    mgr.current = stage_index
+    mgr.steps_in_stage = STAGES[mgr.order[stage_index]].min_steps
+    return mgr
+
+
 def test_stage_manager_direction_of_better():
     from relgat_projector.trainer.stages import StageManager
 
-    # F2 gate: lower-is-better metrics (cce, isot)
-    mgr = StageManager()
-    mgr.current = 1
-    assert mgr.should_stop({"eval/cce": 1e-6, "eval/isot": 0.0}) is True
-    mgr2 = StageManager()
-    mgr2.current = 1
-    assert mgr2.should_stop({"eval/cce": 0.9, "eval/isot": 0.0}) is False
+    # F2 gate: the ranking lift over the raw-base baseline, higher is better
+    mgr = _past_min_steps(StageManager(), 1)
+    assert mgr.should_stop({"eval/mrr_lift": 0.05}) is True
+    assert mgr.should_stop({"eval/mrr_lift": -0.05}) is False
+    # F3 gate: the two-hop transport must beat the identity on its own target
+    mgr3 = _past_min_steps(StageManager(), 2)
+    assert mgr3.should_stop({"eval/path_lift": 0.05}) is True
+    assert mgr3.should_stop({"eval/path_lift": -0.05}) is False
     # F1 gate: the anchor is higher-is-better
-    mgr3 = StageManager()
-    mgr3.current = 0
-    assert mgr3.should_stop({"eval/anchor": 0.99}) is True
-    assert StageManager().should_stop({"eval/anchor": 0.1}) is False
+    mgr1 = _past_min_steps(StageManager(), 0)
+    assert mgr1.should_stop({"eval/anchor": 0.99}) is True
+    assert mgr1.should_stop({"eval/anchor": 0.1}) is False
 
 
 def test_stage_gate_requires_every_metric():
@@ -112,13 +121,26 @@ def test_stage_gate_requires_every_metric():
     """
     from relgat_projector.trainer.stages import StageManager
 
-    mgr = StageManager()
-    mgr.current = 1
+    mgr = _past_min_steps(StageManager(), 1)
     assert mgr.should_stop({"eval/cce": 0.0}) is False, "cce alone opened F2"
     # metrics that are not part of the gate are ignored
     assert mgr.should_stop({"eval/cce": 0.0, "eval/isot": 0.01,
-                            "eval/cos_edge": -1.0}) is True
+                            "eval/cos_edge": -1.0,
+                            "eval/mrr_lift": 0.5}) is True
     # a metric that was never computed cannot open the gate either
-    mgr2 = StageManager()
-    mgr2.current = 1
-    assert mgr2.should_stop({"eval/cce": 0.001}) is False
+    mgr2 = _past_min_steps(StageManager(), 1)
+    assert mgr2.should_stop({"eval/isot": 0.0}) is False
+
+
+def test_stage_cannot_be_left_before_min_steps():
+    """A gate that is already true at initialisation must not rush the curriculum."""
+    from relgat_projector.trainer.stages import StageManager
+
+    # F1's anchor gate is satisfied by construction at step 0 (the refinement
+    # starts as the exact identity of the projected base vectors)
+    mgr = StageManager()
+    assert mgr.should_stop({"eval/anchor": 1.0}) is False
+    mgr.steps_in_stage = 1
+    assert mgr.should_stop({"eval/anchor": 1.0}) is False
+    _past_min_steps(mgr, 0)
+    assert mgr.should_stop({"eval/anchor": 1.0}) is True

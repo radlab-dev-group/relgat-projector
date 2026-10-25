@@ -117,10 +117,36 @@ def test_context_toggle_preserves_transform_when_eps_zero():
     before = op.apply(x, rel)
     op.enable_context(True)
     after = op.apply(x, rel)
-    # context is on but starts negligible (eps ~ 2.5e-3) with a zero
-    # hyper-network output, so transport must not move yet
-    assert op.use_context and op.eps < 0.01
-    assert torch.allclose(before, after, atol=1e-4)
+    # context is on but the hyper-network output starts at ~1e-3, so transport
+    # must not move yet.  eps itself is deliberately NOT tiny: Adam moves the
+    # log of a scalar by ~lr per step, so an init of exp(-6) could never be
+    # learned at all (measured: log_eps ended a 35-epoch run at -5.43).
+    assert op.use_context and 0.05 < op.eps < 0.5
+    # eps is ~0.135 now, but the hyper-network output is ~1e-3, so the
+    # modulation of the coefficients is eps * P(relu(W x)) ~ 1e-3 -- the
+    # transport must not move measurably yet
+    assert (before - after).abs().max() < 1e-3
+    assert torch.allclose(before, after, atol=1e-3)
+    # and the connection is trainable in both directions from here
+    assert op.log_eps.requires_grad
+
+
+def test_connection_strength_can_be_learned():
+    """The strength of the connection must move under its own gradient."""
+    op = build_operator("givens", dim=16, num_rel=3, num_generators=4,
+                        use_context=True)
+    x = torch.randn(32, 16, requires_grad=True)
+    rel = torch.randint(0, 3, (32,))
+    target = torch.randn(32, 16)
+    opt = torch.optim.Adam(op.parameters(), lr=5e-2)
+    before = op.eps
+    for _ in range(200):
+        loss = torch.nn.functional.mse_loss(op.apply(x, rel), target)
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+    assert op.log_eps.grad is not None
+    assert abs(float(torch.log(torch.tensor(op.eps))) - float(torch.log(torch.tensor(before)))) > 0.05
 
 
 def test_unknown_operator_is_rejected():

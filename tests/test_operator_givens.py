@@ -151,3 +151,30 @@ def test_basis_stays_skew_under_gradient_steps():
     ci = torch.nn.functional.cosine_similarity(u, v, dim=-1)
     co = torch.nn.functional.cosine_similarity(tu, tv, dim=-1)
     assert (ci - co).abs().max() < 1e-4, "operator no longer preserves cosines"
+
+
+def test_rotation_matrix_survives_a_broken_batched_solve():
+    """The lstsq fallback must produce the same orthogonal rotation.
+
+    Multi-threaded oneMKL breaks batched ``torch.linalg.solve`` (invalid LU
+    pivots), which used to take down every CPU inference of a 256-d model; the
+    operator falls back instead of failing.
+    """
+    from relgat_projector.core.operator.givens import GivensRelationOperator
+
+    op = GivensRelationOperator(dim=32, num_rel=4, num_generators=4)
+    rel = torch.tensor([0, 1, 2, 3])
+    x = torch.randn(4, 32)
+    reference = op.apply(x, rel)
+
+    original = GivensRelationOperator._LU_SOLVE_OK
+    try:
+        GivensRelationOperator._LU_SOLVE_OK = False
+        fallback = op.apply(x, rel)
+    finally:
+        GivensRelationOperator._LU_SOLVE_OK = original
+    assert torch.allclose(reference, fallback, atol=1e-4)
+
+    R = op.relation_matrices()
+    eye = torch.eye(R.shape[-1])
+    assert (R.transpose(-1, -2) @ R - eye).abs().max() < 1e-4
