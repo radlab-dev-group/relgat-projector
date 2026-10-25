@@ -42,6 +42,38 @@ class ShadowLoss(nn.Module):
         diff = trst - tstr
         return self.commut_weight * torch.sqrt(diff.pow(2).mean() + self.eps)
 
+    def commute_gated(
+        self,
+        trst: torch.Tensor,
+        tstr: torch.Tensor,
+        c_rs: torch.Tensor,
+        margin: float | None = None,
+    ) -> torch.Tensor:
+        """Commutation consistency *as the learned structure prescribes*.
+
+        Forcing ``T_r T_s = T_s T_r`` on every pair would collapse the operator
+        onto a diagonal (DistMult-like) one -- exactly the degenerate model the
+        method exists to avoid, and in direct conflict with the anti-commuting
+        entries of ``C_rs``.  So off the graph, just as in
+        :class:`CurvatureLoss`, pairs the model believes commute are pulled
+        together and pairs it believes do not are only required to be
+        *consistently* non-commuting.
+        """
+        gap = (trst - tstr).pow(2).mean(dim=-1)
+        gap_l2 = torch.sqrt(gap + self.eps)
+        comm = (c_rs * gap).mean()
+        # ``margin`` is an l2 distance between two transported vectors, so it
+        # must scale with the norm of the vectors it compares: a fixed 0.25 is
+        # dead in a chart whose vectors have norm ~1.3 (measured gaps for
+        # genuinely non-commuting relation pairs are 0.02-0.06).  ``None``
+        # derives it from the batch, matching CurvatureLoss.effective_margin.
+        if margin is None:
+            m = 2.0 * 0.02 * trst.detach().norm(dim=-1).clamp_min(1e-8)
+        else:
+            m = torch.as_tensor(margin, device=trst.device).expand_as(gap_l2)
+        anti = ((1.0 - c_rs) * (gap_l2 - m).clamp_min(0.0)).mean()
+        return self.commut_weight * (comm + anti)
+
     def pull(
         self,
         projected_transformed: torch.Tensor,  # P(T_r(z))
@@ -66,11 +98,37 @@ class ShadowLoss(nn.Module):
 
 
 class DecoderLoss(nn.Module):
-    """Supervision for the relation decoder ``g(x, y) -> r`` (PLAN.md 1.5)."""
+    """Supervision for the relation decoder ``g(x, y) -> r`` (PLAN.md 1.5).
 
-    def __init__(self, confidence_weight: float = 0.2):
+    ``class_weights`` exists because the relation distribution of a WordNet is
+    nowhere near uniform (``synonimia`` carries 49.7 % of the Słowosieć edges,
+    ~30 relations carry fewer than 100): trained with a plain cross-entropy the
+    head learns to answer the frequent relations and its *macro* accuracy -- the
+    only honest average here -- collapses.  The trainer passes inverse-frequency
+    weights tempered by ``decoder_balance``.
+    """
+
+    def __init__(self, confidence_weight: float = 0.2, label_smoothing: float = 0.0,
+                 class_weights: torch.Tensor | None = None):
         super().__init__()
         self.confidence_weight = confidence_weight
+        self.label_smoothing = float(label_smoothing)
+        self.register_buffer(
+            "class_weights",
+            torch.ones(0) if class_weights is None else class_weights.detach(),
+        )
+
+    def set_class_weights(self, class_weights: torch.Tensor | None) -> None:
+        """Weights keep the device they are given on.
+
+        The loss modules are not submodules of the model, so ``model.to(cuda)``
+        never touches them: pinning the buffer to its own (CPU) device here made
+        every CUDA run die in ``cross_entropy`` with "weight is on cpu".
+        """
+        if class_weights is None:
+            self.class_weights = torch.ones(0, device=self.class_weights.device)
+            return
+        self.class_weights = class_weights.detach()
 
     def forward(
         self,
@@ -78,7 +136,11 @@ class DecoderLoss(nn.Module):
         confidence: torch.Tensor,  # [B]
         rel_ids: torch.Tensor,     # [B] ground-truth relations
     ) -> torch.Tensor:
-        ce = nn.functional.cross_entropy(logits, rel_ids.long())
+        weight = self.class_weights if self.class_weights.numel() else None
+        ce = nn.functional.cross_entropy(
+            logits, rel_ids.long(), weight=weight,
+            label_smoothing=self.label_smoothing,
+        )
         conf = nn.functional.binary_cross_entropy_with_logits(
             confidence - confidence.mean().detach(), torch.ones_like(confidence)
         ) * self.confidence_weight

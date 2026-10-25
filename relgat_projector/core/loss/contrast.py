@@ -28,7 +28,10 @@ class ContrastLoss(nn.Module):
     ) -> torch.Tensor:
         q = F.normalize(query, p=2, dim=-1)
         k = F.normalize(keys, p=2, dim=-1)
-        logits = q @ k.t() / self.temperature  # [B, N]
+        # clamp so that a near-duplicate (e.g. a synonym that is already almost
+        # identical to the transformed query) cannot push its logit to -inf and
+        # make softmax(0/0) -> NaN; 1e4 is still ~e^-139000, i.e. a hard floor
+        logits = (q @ k.t() / self.temperature).clamp(min=-1e4)  # [B, N]
         if mask is not None:
             logits = logits.masked_fill(mask, float("-inf"))
         labels = target_idx.long()
