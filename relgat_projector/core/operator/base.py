@@ -99,11 +99,25 @@ class RelationalOperator(abc.ABC):
         return out
 
     @abc.abstractmethod
-    def inverse(self, x: torch.Tensor, rel_ids: torch.Tensor) -> torch.Tensor:
+    def inverse(
+        self,
+        x: torch.Tensor,
+        rel_ids: torch.Tensor,
+        base_point: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Apply the inverse transform of ``rel_ids`` to ``x``.
 
         For operators with :attr:`exact_inverse` this satisfies
         ``T_r^{-1}(T_r(x)) == x`` up to floating-point round-off.
+
+        ``base_point`` is the point the forward transform was applied *at*.  A
+        connection with base-point-dependent coefficients maps ``x`` by
+        ``A(x) = exp(Omega(theta + eps * P(x)))``, whose inverse is
+        ``A(x)^{-1}`` -- the coefficients of the origin of the transport, not of
+        the destination.  Callers that go forward and back from the same point
+        have to pass it, otherwise the round trip is not a round trip and the
+        cycle loss spends its whole gradient pushing the connection back to
+        zero.
         """
 
     def dial(

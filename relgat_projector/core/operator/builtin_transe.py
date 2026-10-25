@@ -52,7 +52,8 @@ class TransEOperator(nn.Module, RelationalOperator):
             out = (1.0 - lam) * x + lam * out
         return out
 
-    def inverse(self, x: torch.Tensor, rel_ids: torch.Tensor) -> torch.Tensor:
+    def inverse(self, x: torch.Tensor, rel_ids: torch.Tensor,
+                base_point: torch.Tensor | None = None) -> torch.Tensor:
         r = self.rel_emb(rel_ids)
         if self.normalize:
             r = torch.nn.functional.normalize(r, p=2, dim=-1)

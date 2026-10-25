@@ -56,7 +56,8 @@ class DistMultOperator(nn.Module, RelationalOperator):
             out = (1.0 - lam) * x + lam * out
         return out
 
-    def inverse(self, x: torch.Tensor, rel_ids: torch.Tensor) -> torch.Tensor:
+    def inverse(self, x: torch.Tensor, rel_ids: torch.Tensor,
+                base_point: torch.Tensor | None = None) -> torch.Tensor:
         r = self._relation(rel_ids)
         # coordinates that a unit relation made (near-)zero carry no signal:
         # treat them as identity instead of dividing by them
