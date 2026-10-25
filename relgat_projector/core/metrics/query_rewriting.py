@@ -27,7 +27,7 @@ geometry metrics look.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 
@@ -59,9 +59,9 @@ def rank_of_target(
         better = scores > target
     elif tie_break == "pessimistic":
         better = scores >= target
-        # the gold column itself is always counted by >=; rank is a count,
-        # so dropping one keeps it "1 + the others that beat or tie it"
-        better = better & ~(mask if mask is None else mask) if False else better
+        # the gold column always ties itself and ``>=`` counts that tie; rank
+        # is a count of *other* columns, so the gold is dropped here and the
+        # "+1" below adds it back
         better[torch.arange(B, device=scores.device), target_idx] = False
     else:
         raise ValueError(f"unknown tie_break={tie_break!r}")
@@ -163,16 +163,27 @@ def _build_mask(
 
 
 def _other_golds(
-    pairs: Sequence[Tuple[int, int]], answers: torch.Tensor
+    pairs: Sequence[Tuple[int, int]],
+    answers: torch.Tensor,
+    by_query: Optional[Mapping[int, Iterable[int]]] = None,
 ) -> Optional[torch.Tensor]:
-    """For each query, the *other* answers of the same relation (filtered protocol)."""
-    by_query: Dict[int, List[int]] = {}
-    for q, a in pairs:
-        by_query.setdefault(q, []).append(a)
+    """For each query, the *other* answers of the same relation (filtered protocol).
+
+    ``by_query`` is the gold answer table of the *whole* graph.  Without it the
+    other answers are whatever else the sample happened to contain, and a query
+    with 40 true answers that appears once in the probe gets no filtering at all
+    -- every one of its other 39 correct answers is then counted as a miss.
+    Callers that hold the graph pass the table and the metric stops depending
+    on the sample.
+    """
+    if by_query is None:
+        by_query = {}
+        for q, a in pairs:
+            by_query.setdefault(q, []).append(a)
     rows = []
     width = 0
     for q, a in [(q, a) for q, a in pairs]:
-        others = [x for x in by_query.get(q, []) if x != int(a)]
+        others = [int(x) for x in by_query.get(q, ()) if int(x) != int(a)]
         rows.append(others)
         width = max(width, len(others))
     if width == 0:
@@ -197,12 +208,16 @@ def qr_recall(
     tie_break: str = "optimistic",
     relation: str = "?",
     chain: Tuple[int, ...] = (),
+    other_map: Optional[Mapping[int, Iterable[int]]] = None,
 ) -> QRResult:
     """Recall before/after a query transform on gold pairs.
 
     ``index`` is the searchable corpus (the vector database contents); the
     pairs reference positions in it.  ``transform`` maps query vectors to
-    rewritten queries, in the same space as ``index``.
+    rewritten queries, in the same space as ``index``.  ``other_map`` is the
+    graph's answer table (``query -> every true answer``) used to filter
+    correct-but-unlisted answers; without it only the answers inside ``pairs``
+    are known, which understates the recall of high-multiplicity relations.
     """
     device = index.device
     if not pairs:
@@ -211,7 +226,7 @@ def qr_recall(
     queries = torch.tensor([q for q, _ in pairs], dtype=torch.long, device=device)
     answers = torch.tensor([a for _, a in pairs], dtype=torch.long, device=device)
 
-    other = _other_golds(pairs, answers) if filter_others else None
+    other = _other_golds(pairs, answers, other_map) if filter_others else None
     mask = _build_mask(index.shape[0], queries, answers, other, exclude_self)
 
     q_raw = index[queries]
