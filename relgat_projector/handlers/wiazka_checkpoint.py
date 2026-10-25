@@ -90,7 +90,8 @@ def save_checkpoint(
         names = [k for _, k in sorted(((v, k) for k, v in rel2idx.items()))]
         np.savetxt(
             os.path.join(ckpt_dir, f"{_C_FILE}.csv"), c,
-            delimiter=",", header="," + ",".join(str(n) for n in names),
+            delimiter=",",
+            header="," + ",".join(str(n).replace(",", ";") for n in names),
             comments="", fmt="%.6f",
         )
 
@@ -98,6 +99,40 @@ def save_checkpoint(
         with open(os.path.join(ckpt_dir, _METRICS_FILE), "w", encoding="utf-8") as f:
             json.dump(_dumpable(metrics), f, indent=2, sort_keys=True)
     return ckpt_dir
+
+
+#: State-dict entries a model may be missing when loading an older checkpoint.
+#: Each entry must be a parameter whose constructor default reproduces the
+#: behaviour the model had before the parameter existed.
+_TOLERATED_MISSING = frozenset({"transport_dial"})
+
+
+def apply_calibrated_scalars(model, meta: Optional[Dict[str, Any]]) -> None:
+    """Restore the scalars that were *fitted* during training, not learned.
+
+    ``relation_prior_strength`` and ``relation_ensemble_weight`` are ordinary
+    attributes, so they are not in the state dict and a model rebuilt from a
+    checkpoint would score with the constructor defaults.  That is not neutral:
+    the default prior ``1.0`` is the Bayes correction of an *unweighted* head,
+    and applied to a class-balanced head it takes relation naming from macro
+    0.47 to 0.05 (the balanced head already fits ``p(r|x) w(r)``).  A checkpoint
+    written before the scalars were fitted gets the value its own head training
+    implies -- balanced head: no correction, unweighted head: the classic one.
+
+    Every loader has to call this, or the model a caller gets is not the model
+    the run's report measured.
+    """
+    run_config = ((meta or {}).get("config") or {})
+    for name in ("relation_ensemble_weight", "relation_prior_strength"):
+        fitted = run_config.get(name)
+        if fitted is None:
+            if name == "relation_prior_strength":
+                balanced = float(run_config.get("decoder_balance", 0.0)) > 0.0
+                fitted = 0.0 if balanced else 1.0
+            else:
+                continue          # a neutral mix is the pre-fit behaviour
+        if hasattr(model, name):
+            setattr(model, name, float(fitted))
 
 
 def load_checkpoint(
@@ -126,7 +161,22 @@ def load_checkpoint(
         edge_index=torch.zeros(*edge_shape, dtype=torch.long),
         edge_type=torch.zeros(*state["edge_type"].shape, dtype=torch.long),
     )
-    model.load_state_dict(state)
+    # Strict in everything but the parameters this format gained *after* it was
+    # written: ``strict=True`` alone makes an old checkpoint unreadable the
+    # moment the model grows a tensor, and silently swallowing every missing key
+    # would hide a genuinely truncated file.  A key is tolerated only when it is
+    # listed below, and the model keeps its documented initialisation for it --
+    # for ``transport_dial`` that initialisation is "rewrite at full strength",
+    # i.e. exactly the behaviour a checkpoint written before the dial existed
+    # had.
+    result = model.load_state_dict(state, strict=False)
+    unexpected = list(result.unexpected_keys)
+    missing = [k for k in result.missing_keys if k.split(".")[0] not in _TOLERATED_MISSING]
+    if unexpected or missing:
+        raise RuntimeError(
+            "checkpoint does not match the model architecture: "
+            f"missing={missing[:8]} unexpected={unexpected[:8]}"
+        )
     model = model.to(device)
     model.eval()
 
@@ -135,6 +185,7 @@ def load_checkpoint(
     if os.path.exists(cfg_path):
         with open(cfg_path, encoding="utf-8") as f:
             meta = json.load(f)
+    apply_calibrated_scalars(model, meta)
     return model, bundle["rel2idx"], spec, meta
 
 

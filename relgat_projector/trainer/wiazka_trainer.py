@@ -13,7 +13,7 @@ from __future__ import annotations
 import random
 import dataclasses
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -37,6 +37,10 @@ from relgat_projector.core.sampler import (
     ShadowSampler,
 )
 from relgat_projector.trainer.stages import StageManager
+from relgat_projector.core.metrics.ranking import (
+    filtered_ranking,
+    stratified_edge_probe,
+)
 
 
 @dataclass
@@ -49,6 +53,12 @@ class WiazkaConfig:
     dropout: float = 0.1
     use_scale: bool = True
     use_context: bool = False
+    #: master switch for the F4 connection (base-point-dependent transport).
+    #: ``False`` keeps the whole curriculum but leaves ``theta(r, x) = theta_r``
+    #: position-independent, which is the ablation that says what the connection
+    #: is worth -- it became learnable in 0.3.1 (it could not move before), so
+    #: every number quoted for it up to then was measured with it dead.
+    enable_connection: bool = True
     lr: float = 3e-4
     weight_decay: float = 1e-4
     batch_size: int = 64
@@ -64,6 +74,194 @@ class WiazkaConfig:
     shadow_jitter: float = 0.35
     # F4: shadow vectors drawn per step (PLAN.md 2.6)
     shadow_batch: int = 64
+    #: softmax temperature of every contrastive term (``L_con``, ``L_pull``).
+    #: Queries and keys are unit-normalised, so this is the only knob that sets
+    #: how much gradient the *hard* negatives keep: 0.07 is the SimCLR default,
+    #: a smaller value sharpens the ranking and weights the nearest distractors.
+    contrast_temperature: float = 0.07
+    #: queries used by the full-softmax contrast term.  Keys are *every* node,
+    #: so the cost of this term is ``queries x num_nodes`` -- at batch_size
+    #: 2048 and 243k nodes that is ~2 GB of logits per step.  Capping the
+    #: queries keeps the exact full-softmax objective inside a sane budget.
+    contrast_batch: int = 512
+    #: sample the relation type uniformly instead of the edge uniformly
+    balance_relations: bool = True
+    #: temper exponent of relation-balanced sampling: a relation is drawn
+    #: with probability ``count ** balance_power`` (renormalised).
+    #: ``1.0`` = the raw edge distribution (``synonimia`` is half the graph, so
+    #: the ~30 relations with fewer than 100 edges are never sampled and their
+    #: transport stays at initialisation); ``0.0`` = uniform over relations
+    #: (those relations train, but the one relation holding 50 % of the graph
+    #: sees 1/56 of the batches it needs -- measured: ``synonimia`` MRR fell
+    #: 0.59 -> 0.35 while rare relations improved).  ``0.5`` is the standard
+    #: tempered-sampling compromise: synonimia 16.3 % of every batch (against
+    #: 1.8 % uniform / 49.7 % raw) and the 14 relations with <100 edges 3.1 %
+    #: (against 25 % / 0.15 %).
+    balance_power: float = 0.5
+    #: relation-aware softmax attention in the GAT aggregation (PLAN.md 3.2a).
+    #: With it off, messages are summed over *all* incoming edges: the node
+    #: vector is then an unnormalised blend of every relation type it touches,
+    #: which measurably costs ``synonimia`` recall on a relation-skewed graph.
+    gat_attention: bool = True
+    #: initialise base_to_op from the principal subspace of the base embeddings
+    #: and tie to_retriever to its transpose (see WiazkaModel).  Without it the
+    #: export into the retriever space is an untrained random map until F4.
+    proj_pca: bool = True
+    #: probe size for evaluation; scored against all nodes, so keep this
+    #: moderate (cost is O(probe x num_nodes))
+    probe_size: int = 1024
+    #: ``L_anchor = weight * relu((1 - cos(refined, base)) - margin)``.
+    #: The refinement is what lets the transport beat plain similarity, but a
+    #: refinement that moves too far destroys the neighbourhood structure the
+    #: base embeddings already have (measured: identity transport over the
+    #: refined index scores *below* the raw base ranking), so this is the knob
+    #: that trades graph signal against index quality.
+    anchor_weight: float = 0.5
+    anchor_margin: float = 0.05
+    #: weight of ``L_knn`` -- the *structure*-preserving counterpart of
+    #: ``L_anchor``.  ``L_anchor`` keeps every vector near its own base
+    #: position, but MRR is a ranking measure: what has to survive refinement
+    #: is the *neighbourhood order*, not the absolute position.  ``L_knn``
+    #: samples pairs that are near in the operator chart (the space the refined
+    #: index actually lives in) and only penalises the refinement when it pulls
+    #: them apart by more than ``knn_slack``.
+    #: Measured on the Slowosiec: refinement moved the index so that identity
+    #: transport over it scored 0.065 MRR against 0.091 for the raw base
+    #: vectors, and morphology relations lost up to 0.25 MRR, while the same
+    #: refinement gained 0.5 on semantic-role relations.
+    knn_weight: float = 0.0
+    #: neighbours (in the operator chart) kept per anchor node
+    knn_k: int = 8
+    #: anchor nodes whose base neighbourhoods are preserved
+    knn_anchors: int = 4096
+    #: tolerated drop of ``cos`` on a base-neighbour pair
+    knn_slack: float = 0.02
+    #: pairs sampled from the preserved neighbourhoods per training step
+    knn_batch: int = 512
+    #: weight of ``L_path`` (composition over chains of k >= 2).  PCE grows
+    #: ~linearly with the hop count unless composition is pushed explicitly.
+    path_weight: float = 1.0
+    #: the relation decoder is trained with class weights proportional to
+    #: ``count^-decoder_balance``: the Słowosieć relation distribution puts
+    #: 49.7 % of the edges on ``synonimia`` and ~30 relations have fewer than
+    #: 100 edges, so a plain cross-entropy head answers the frequent relations
+    #: and its macro accuracy (the honest average) collapses.  0.5 matches the
+    #: tempered edge sampling and 1.0 is full inverse-frequency.
+    decoder_balance: float = 0.5
+    #: label smoothing of the decoder CE (keeps the head from saturating on the
+    #: 50 % ``synonimia`` class)
+    decoder_label_smoothing: float = 0.05
+    #: learning-rate multiplier of the per-relation rewriting dial.  It is 56
+    #: scalars whose gradient comes from ``L_pull`` only, i.e. from the
+    #: ``pull_batch`` queries of a step -- a handful per relation -- so at the
+    #: base lr the sign flips more often than it points anywhere: after a full
+    #: 35-epoch run every dial had moved 0.04 in logit space and sat at
+    #: ``lam ~ 0.81``, the relation-blind answer it started with.
+    dial_lr_scale: float = 20.0
+    #: weight of ``L_pull`` -- the *production* term: an exported transformed
+    #: query must retrieve the right node from the base index (what the vector
+    #: database actually holds).  Scored with the same full softmax as the
+    #: ``prod_*`` eval protocol, so this is the loss that closes the gap
+    #: between the graph metric (``eval/mrr``) and the product metric.
+    pull_weight: float = 1.0
+    #: queries for ``L_pull``; keys are every node of the *base* index, so the
+    #: cost is ``pull_batch x num_nodes x base_dim``.
+    pull_batch: int = 256
+    # learning rate schedule: {constant, cosine, linear} + warmup fraction
+    lr_scheduler: str = "cosine"
+    warmup_ratio: float = 0.05
+    # where the best-checkpoint is written while training (set by the runner)
+    save_dir: str = "wiazka-models"
+
+
+#: candidate weights of the transport evidence in the relation ensemble,
+#: ``z(head) + w * z(transport)``
+ENSEMBLE_WEIGHT_GRID = (0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
+
+
+def spread_sample(rows: Sequence, n: int, seed: int = 0) -> List:
+    """``n`` uniformly chosen elements of ``rows``, deterministically.
+
+    Used wherever a calibration takes "a few examples per relation".  The edge
+    list is ordered by source id, so the first 96 ``synonimia`` edges are 96
+    adjacent nodes of one frequency band, and a dial fitted on them describes
+    that neighbourhood rather than the relation.  A *fixed stride* is not the
+    answer either -- a stride commensurate with a period in the data aliases
+    (every 20th edge of a list that interleaves ten relations is the same
+    relation) -- so this draws with a seeded generator and returns the indices
+    sorted, which is uniform, deterministic and reproducible.
+    """
+    total = len(rows)
+    n = int(n)
+    if n <= 0 or total <= n:
+        return list(rows)
+    gen = torch.Generator().manual_seed(int(seed))
+    idx = torch.randperm(total, generator=gen)[:n].tolist()
+    return [rows[i] for i in sorted(idx)]
+
+
+#: candidate strengths of the training-frequency correction of the relation head
+def smooth_curve(values: Sequence[float], window: int = 3) -> List[float]:
+    """Centred moving average of a scanned curve, ends included.
+
+    A grid scan chooses the argmax of a *noisy* curve: the dial is fitted from
+    ~100 probe edges per relation, so two neighbouring grid points differ by a
+    handful of probes and an unsmoothed argmax locks onto spikes that are pure
+    sampling noise.  Averaging kills single-point spikes, and because a centred
+    average preserves monotone order it does not drag an optimum away from a
+    boundary: a curve that only decreases still peaks at its first grid point,
+    so "do not rewrite" stays reachable.
+    """
+    v = [float(x) for x in values]
+    n = len(v)
+    half = max(0, int(window) // 2)
+    if n <= 1 or half == 0:
+        return v
+    out = []
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        out.append(sum(v[lo:hi]) / (hi - lo))
+    return out
+
+
+PRIOR_STRENGTH_GRID = (-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def macro_relation_accuracy(pred: torch.Tensor, rel: torch.Tensor,
+                            num_rel: int) -> float:
+    """Mean over relations of top-1 accuracy, counting only seen relations."""
+    correct = (pred == rel).float()
+    per_rel_sum = torch.zeros(num_rel)
+    per_rel_n = torch.zeros(num_rel)
+    per_rel_sum.index_add_(0, rel.cpu(), correct.cpu())
+    per_rel_n.index_add_(0, rel.cpu(), torch.ones_like(correct).cpu())
+    seen = per_rel_n > 0
+    if not bool(seen.any()):
+        return 0.0
+    return float((per_rel_sum[seen] / per_rel_n[seen]).mean().item())
+
+
+def fit_ensemble_weight(
+    head: torch.Tensor,
+    transport: torch.Tensor,
+    rel: torch.Tensor,
+    num_rel: int,
+    grid: Sequence[float] = ENSEMBLE_WEIGHT_GRID,
+) -> float:
+    """Grid argmax of macro accuracy for ``z(head) + w * z(transport)``.
+
+    Ties go to the *smaller* weight: when the transport adds nothing the head is
+    kept alone rather than diluted by it.
+    """
+    zh = WiazkaModel._row_zscore(head)
+    zt = WiazkaModel._row_zscore(transport)
+    best_alpha, best_acc = float(grid[0]), -1.0
+    for alpha in grid:
+        acc = macro_relation_accuracy(
+            (zh + float(alpha) * zt).argmax(dim=-1), rel, num_rel)
+        if acc > best_acc + 1e-9:
+            best_alpha, best_acc = float(alpha), acc
+    return best_alpha
 
 
 def _build_adjacency(
@@ -75,6 +273,41 @@ def _build_adjacency(
         out_adj[s].append((d, r))
         in_adj[d].append((s, r))
     return out_adj, in_adj
+
+
+def principal_projection(
+    node_emb: torch.Tensor, dim: int, device: str = "cpu", seed: int = 42,
+    n_iter: int = 4,
+) -> torch.Tensor:
+    """Orthonormal ``[dim, base_dim]`` basis of the base embedding subspace.
+
+    The operator and the export share this basis, so at initialisation
+    ``to_retriever(base_to_op(x))`` is an orthogonal projection: the transport
+    starts inside a faithful low-dimensional copy of the retriever space and
+    cosine search in the exported vectors is meaningful from step 0 (a random
+    linear export made every pre-F4 QR-Recall measurement exactly 0.0).
+    """
+    if dim <= 0:
+        raise ValueError(f"dim must be positive, got {dim}")
+    if dim >= min(node_emb.shape):
+        raise ValueError(
+            f"cannot take a {dim}-dimensional subspace of a "
+            f"{tuple(node_emb.shape)} matrix"
+        )
+    x = node_emb.to(device)
+    x = x - x.mean(dim=0, keepdim=True)
+    q = min(dim, min(x.shape))
+    try:
+        # pca_lowrank draws its random test matrix from the global generator:
+        # seed it so the projection (and therefore the run) is reproducible
+        torch.manual_seed(seed)
+        _, _, V = torch.pca_lowrank(x, q=q, center=False, n_iter=n_iter)
+    except Exception:  # pragma: no cover - degenerate/tiny datasets
+        V = torch.randn(x.shape[1], q, device=x.device)
+    W = V.t()[:dim].contiguous()
+    # re-orthonormalise: the export is the transpose, so orthonormality of the
+    # rows is what makes the round trip an orthogonal projection
+    return torch.linalg.qr(W.t())[0].t().contiguous()
 
 
 class WiazkaTrainer:
@@ -102,6 +335,9 @@ class WiazkaTrainer:
         self.node_emb = torch.stack(
             [torch.as_tensor(node2emb[nid], dtype=torch.float32) for nid in node_ids]
         )
+        # one device copy shared by the eval baselines (an `.to(device)` inside
+        # evaluate() re-uploaded 1.1 GB on every evaluation)
+        self._node_emb_dev = self.node_emb.to(self.cfg.device)
 
         # compact edges
         self.edges: List[Tuple[int, int, int]] = [
@@ -124,11 +360,52 @@ class WiazkaTrainer:
             )
         self.topology_endpoint_coverage = self._coverage_report()
 
-        src = torch.tensor([e[0] for e in self.edges], dtype=torch.long)
-        dst = torch.tensor([e[1] for e in self.edges], dtype=torch.long)
-        et = torch.tensor([e[2] for e in self.edges], dtype=torch.long)
-        self.edge_index = torch.stack([src, dst], dim=0)
-        self.edge_type = et
+        # Precomputed once: rebuilding these from a Python list of 324k tuples
+        # on every training step was pure waste.
+        self.edge_tensor = torch.tensor(self.edges, dtype=torch.long)
+        self.edge_index = self.edge_tensor[:, [0, 1]].t().contiguous()
+        self.edge_type = self.edge_tensor[:, 2].contiguous()
+        # (src, rel) -> every true target: used both for the filtered MRR
+        # protocol and for false-negative masking in the contrast loss.
+        self._targets_by_src_rel: Dict[Tuple[int, int], List[int]] = {}
+        for s, d, r in self.edges:
+            self._targets_by_src_rel.setdefault((s, r), []).append(d)
+        for s, d, r in self.eval_edges:
+            self._targets_by_src_rel.setdefault((s, r), []).append(d)
+        # node -> relation types it really participates in: the applicability
+        # head may only be taught "not applicable" for a relation that is truly
+        # absent from that node's neighbourhood
+        # edges grouped by relation id, for relation-balanced sampling
+        rel_order = torch.argsort(self.edge_tensor[:, 2])
+        self._edge_tensor_by_rel = self.edge_tensor[rel_order].contiguous()
+        self._rel_counts = torch.bincount(
+            self._edge_tensor_by_rel[:, 2], minlength=self.num_rel
+        )
+        self._rel_offsets = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.long),
+                torch.cumsum(self._rel_counts[:-1], dim=0),
+            ]
+        )
+        #: inverse-CDF of the tempered relation sampling distribution
+        #: (``count ** balance_power``, renormalised; absent relations weight 0
+        #: so they can never be drawn).  ``searchsorted`` on a tie returns the
+        #: *first* index, which is the preceding relation that does carry
+        #: weight, so a zero-weight entry cannot be selected.
+        power = float(self.cfg.balance_power)
+        weights = self._rel_counts.to(torch.float64).clamp_min(0.0)
+        if power != 1.0:
+            weights = weights.pow(power)
+        weights[self._rel_counts == 0] = 0.0
+        total = float(weights.sum())
+        if total <= 0.0:
+            weights = self._rel_counts.to(torch.float64)
+            total = float(weights.sum())
+        self._rel_sample_cdf = torch.cumsum(weights / total, dim=0)
+        self._rels_by_node: Dict[int, set] = {}
+        for s, d, r in self.edges:
+            self._rels_by_node.setdefault(s, set()).add(r)
+            self._rels_by_node.setdefault(d, set()).add(r)
 
         # operator
         self.operator = build_operator(
@@ -140,6 +417,14 @@ class WiazkaTrainer:
             use_context=False,  # context is enabled by the stage manager at F4
         )
 
+        # a principal subspace only exists below the base dimensionality; an
+        # operator wider than the embeddings keeps its random projection
+        proj_weight = None
+        if self.cfg.proj_pca and self.cfg.op_dim < self.node_emb.size(1):
+            proj_weight = principal_projection(
+                self.node_emb, self.cfg.op_dim, device=self.cfg.device,
+                seed=self.cfg.seed,
+            )
         self.model = WiazkaModel(
             node_emb=self.node_emb,
             edge_index=self.edge_index,
@@ -151,6 +436,16 @@ class WiazkaTrainer:
             dropout=self.cfg.dropout,
             use_applicability=True,
             use_decoder=True,
+            attention=self.cfg.gat_attention,
+            proj_weight=proj_weight,
+            tie_projections=True,
+            # an orthonormal chart cannot survive AdamW: the weights are ~1/sqrt(D)
+            # in magnitude while an Adam step is ~lr, so after a few hundred steps
+            # W W^T was 0.22 away from the identity and every exported query was
+            # geometric garbage (norms 1.5 -> 8.3, QR-Recall 0.0).  Freezing keeps
+            # base<->operator an exact isometry; export_proj is the learned escape
+            # hatch, gated from L_pull.
+            freeze_projection=proj_weight is not None,
         ).to(self.cfg.device)
 
         # samplers
@@ -178,11 +473,45 @@ class WiazkaTrainer:
         # losses
         self.transport_loss = TransportLoss()
         self.path_loss = PathLoss()
-        self.curvature_loss = CurvatureLoss(self.num_rel)
-        self.contrast_loss = ContrastLoss()
-        self.stability_loss = StabilityLoss()
+        # CurvatureLoss owns C_rs as a parameter, so it has to live on the
+        # training device like the model does; left on the CPU it raised
+        # "indices should be either on cpu or on the same device" the first
+        # time the curvature term indexed C_rs with CUDA relation ids.
+        # margin_auto: the anti-commutation margin is an l2 distance between
+        # two transported vectors, so a fixed constant is only meaningful for
+        # one particular vector length.  At the default 0.25 with chart
+        # vectors of norm ~1.3 the term is *never* violated (measured route
+        # gaps 0.02-0.06) and the anti-commutation half of the curvature loss
+        # silently trains nothing.
+        self.curvature_loss = CurvatureLoss(
+            self.num_rel, margin_auto=True
+        ).to(self.cfg.device)
+        self.contrast_loss = ContrastLoss(cfg.contrast_temperature)
+        self.stability_loss = StabilityLoss(
+            anchor_weight=self.cfg.anchor_weight,
+            anchor_margin=self.cfg.anchor_margin,
+        )
         self.shadow_loss = ShadowLoss()
-        self.decoder_loss = DecoderLoss()
+        self.decoder_loss = DecoderLoss(
+            label_smoothing=self.cfg.decoder_label_smoothing,
+        )
+        # class weights from the TRAIN edge counts (held-out edges never touch
+        # the decoder, so they never enter the prior either)
+        counts = torch.zeros(self.num_rel, dtype=torch.float64)
+        for s_, d_, r_ in self.edges:
+            counts[r_] += 1.0
+        counts = counts.clamp_min(1.0)
+        power = float(self.cfg.decoder_balance)
+        weights = counts.pow(-power)
+        weights = (weights / weights.mean()).to(torch.float32)
+        self._decoder_class_weights = weights
+        #: raw train-edge counts per relation: the prior the relation
+        #: classifier has to correct for when queries are relation-uniform
+        self._relation_counts = counts.to(torch.float32)
+        # the loss modules are not part of ``self.model``, so they are not
+        # moved by ``WiazkaModel.to(device)``: the weights have to follow the
+        # training device explicitly
+        self.decoder_loss.set_class_weights(weights.to(self.cfg.device))
 
         # shadow manifold: real text vectors from the retriever index.  When
         # none are provided we synthesise them by jittering the base node
@@ -191,10 +520,27 @@ class WiazkaTrainer:
             base_np = self.node_emb.detach().cpu().numpy()
             rng = np.random.default_rng(self.cfg.seed)
             idx = rng.integers(0, len(base_np), size=self.cfg.num_shadow)
-            jitter = rng.normal(
-                0.0, self.cfg.shadow_jitter, size=base_np[idx].shape
-            ).astype(np.float32)
-            shadow_np = base_np[idx] + jitter
+            # Additive per-coordinate noise is wrong in a high-dimensional
+            # cosine space: with D = 1152 and sigma = 0.35 the perturbation has
+            # norm ~12 against a base vector of norm ~1, so the "shadow" is
+            # almost orthogonal noise rather than a text close to a node, and
+            # every off-manifold loss is measured on garbage.  Rotate the base
+            # vector by a bounded angle instead, keeping its norm.
+            anchor = base_np[idx]
+            noise = rng.standard_normal(anchor.shape).astype(np.float32)
+            anchor_n = anchor / np.linalg.norm(anchor, axis=-1, keepdims=True).clip(
+                1e-8
+            )
+            # remove the component along the anchor, then renormalise: the two
+            # parts are orthogonal unit directions, so the mix is an exact
+            # rotation by ``theta`` with cos(theta) = 1 - shadow_jitter
+            noise -= (noise * anchor_n).sum(-1, keepdims=True) * anchor_n
+            noise /= np.linalg.norm(noise, axis=-1, keepdims=True).clip(1e-8)
+            keep = float(np.clip(1.0 - self.cfg.shadow_jitter, 0.0, 1.0))
+            theta = float(np.arccos(keep))
+            direction = np.cos(theta) * anchor_n + np.sin(theta) * noise
+            scale = np.linalg.norm(anchor, axis=-1, keepdims=True)
+            shadow_np = (direction * scale).astype(np.float32)
         else:
             shadow_np = np.asarray(shadow_vectors, dtype=np.float32)
         self.shadow_sampler = ShadowSampler(shadow_np, rng=self.cfg.seed)
@@ -205,19 +551,82 @@ class WiazkaTrainer:
         # NOTE: CurvatureLoss owns the commutation matrix C_rs as a parameter,
         # so the optimizer must include the loss modules, not only the model.
         # Omitting them silently freezes C_rs at its initialisation.
-        params = list(self.model.parameters())
-        for module in (self.curvature_loss,):
-            params += [
-                p for p in module.parameters() if p.requires_grad
-            ]
-        self.optimizer = torch.optim.AdamW(
-            params, lr=self.cfg.lr, weight_decay=self.cfg.weight_decay
-        )
+        #
+        # Weight decay must NOT touch the operator (PLAN.md 2.7): decaying the
+        # rotation angles theta, the log-scales or the generator basis shrinks
+        # the transport toward the identity and destroys the structure the
+        # curriculum is learning.  Only biases and weight matrices get decay.
+        op_param_ids = {id(p) for p in self.operator.parameters()}
+        decay_params, no_decay_params = [], []
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if id(p) in op_param_ids:
+                no_decay_params.append(p)
+            elif p.ndim <= 1:  # biases, gates, heads' last layers' biases
+                no_decay_params.append(p)
+            else:
+                decay_params.append(p)
+        # C_rs is a bounded classification (logits -> sigmoid in [0, 1])
+        # taught by witness supervision, not a weight matrix: decay would pull
+        # it toward "everything unknown" and fight the supervision
+        for p in self.curvature_loss.parameters():
+            if p.requires_grad:
+                no_decay_params.append(p)
+        assert not any(
+            id(p) in op_param_ids for p in decay_params
+        ), "operator parameters must not be weight-decayed"
+        # the rewriting dial is a 56-dim vector of sigmoid gates: same loss,
+        # same update rule, but it needs a larger step than a weight matrix to
+        # leave its initialisation inside one run (see WiazkaConfig.dial_lr_scale)
+        dial_ids = {
+            id(p) for n, p in self.model.named_parameters()
+            if n == "transport_dial"
+        }
+        no_decay_params = [p for p in no_decay_params if id(p) not in dial_ids]
+        dial_params = [p for p in self.model.parameters()
+                       if id(p) in dial_ids and p.requires_grad]
+        groups = [
+            {"params": decay_params, "weight_decay": self.cfg.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+        if dial_params:
+            groups.append({
+                "params": dial_params,
+                "weight_decay": 0.0,
+                "lr": self.cfg.lr * float(self.cfg.dial_lr_scale),
+            })
+        self.optimizer = torch.optim.AdamW(groups, lr=self.cfg.lr)
+        self._scheduler = None
         self.stage_manager = StageManager()
         self.history: List[Dict] = []
         self._sync_stage_state()
 
     # ------------------------------------------------------------- sampling
+    def _build_scheduler(self, steps_per_epoch: int, epochs: int) -> None:
+        total = max(1, steps_per_epoch * epochs)
+        warmup = max(1, int(self.cfg.warmup_ratio * total))
+        if self.cfg.lr_scheduler == "cosine":
+            decay = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=max(1, total - warmup)
+            )
+        elif self.cfg.lr_scheduler == "linear":
+            decay = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer, start_factor=1.0, end_factor=0.05,
+                total_iters=max(1, total - warmup),
+            )
+        else:
+            decay = None
+        if decay is None or warmup >= total:
+            self._scheduler = decay
+            return
+        warm = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup
+        )
+        self._scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer, [warm, decay], milestones=[warmup]
+        )
+
     def _sync_stage_state(self) -> None:
         """Apply the current stage's structural switches to operator + optimizer.
 
@@ -226,10 +635,18 @@ class WiazkaTrainer:
         created *at that moment*, so its parameters have to be registered with
         the optimizer as well -- otherwise context would exist but never train.
         """
-        wanted = self.stage_manager.stage().enable_context
+        wanted = (bool(self.stage_manager.stage().enable_context)
+                  and bool(self.cfg.enable_connection))
         enable = getattr(self.operator, "enable_context", None)
         if enable is not None and bool(self.operator.use_context) != wanted:
             enable(wanted)
+        # F1 declares ``freeze_operator`` (the curriculum learns the node
+        # refinement before any transport exists).  The flag existed but was
+        # never applied, so the operator trained from step one and the stage
+        # was decorative.
+        frozen = bool(self.stage_manager.freeze_operator)
+        for p in self.operator.parameters():
+            p.requires_grad_(not frozen)
         known = {
             id(p)
             for group in self.optimizer.param_groups
@@ -237,7 +654,8 @@ class WiazkaTrainer:
         }
         fresh = [
             p for p in self.model.parameters()
-            if p.requires_grad and id(p) not in known
+            if p.requires_grad and id(p) not in known and
+            not frozen
         ]
         if fresh:
             self.optimizer.add_param_group({"params": fresh})
@@ -272,27 +690,273 @@ class WiazkaTrainer:
         return coverage
 
     def _sample_edges(self, batch_size: int):
-        idx = torch.randint(0, len(self.edges), (batch_size,))
-        e = torch.tensor(self.edges, dtype=torch.long)
-        return e[idx]  # [B, 3]: src, dst, rel
+        if self.cfg.balance_relations:
+            # Draw the relation type with probability proportional to
+            # ``count ** balance_power`` *among the relations that exist*, then
+            # an edge of that type.  Under the raw distribution (power 1) half
+            # of every batch is `synonimia` and the ~30 relations with fewer
+            # than a hundred edges are never seen at all, so their transport
+            # stays at initialisation no matter how long the run goes; a fully
+            # uniform draw (power 0) starves the dominant relation, which is
+            # why the power is tempered rather than 0.
+            cdf = self._rel_sample_cdf
+            u = torch.rand(batch_size, dtype=torch.float64)
+            rel_choice = torch.searchsorted(cdf, u).clamp_max_(cdf.numel() - 1)
+            counts = self._rel_counts[rel_choice]
+            uniform = torch.rand(batch_size) * counts.to(torch.float32)
+            local = uniform.long().clamp_max_(torch.clamp(counts - 1, min=0))
+            idx = self._rel_offsets[rel_choice] + local
+            return self._edge_tensor_by_rel[idx]  # [B, 3]
+        idx = torch.randint(0, len(self.edge_tensor), (batch_size,))
+        return self.edge_tensor[idx]  # [B, 3]: src, dst, rel
+
+    def _other_targets(self, probe):
+        # For each probe edge, the *other* true targets of the same (src, rel):
+        # they are correct answers, so the filtered protocol must not count
+        # them as misses, and the contrast loss must not call them negatives.
+        out = []
+        for s, d, r in probe:
+            out.append(
+                [c for c in self._targets_by_src_rel.get((s, r), ()) if c != d]
+            )
+        return out
+
+    def _rank_mask(self, probe):
+        """The two column classes a ranking protocol has to mask, per probe.
+
+        ``(other_targets, never_valid)`` for
+        :func:`relgat_projector.core.metrics.ranking.filtered_ranking`:
+
+        * ``other_targets`` -- other true targets of the same ``(src, rel)``,
+          which are correct answers and must not count as misses;
+        * ``never_valid`` -- the row of the query node itself.  ``a -r-> b`` is
+          never answered by ``a``: the Słowosieć has **no self-loops** (measured:
+          0 of 359 818 edges), and a retrieval pipeline does not return the query
+          document as the answer.  Left in the index it is a candidate that is
+          certain to be wrong and, of all of them, the one the query resembles
+          most: at small ``lam_r`` the rewritten query still points at
+          ``x_a``, so the source is ranked above the gold and every probe pays a
+          position it should not have to pay.  The penalty is largest exactly
+          where the raw embedding is already good (a synonym sits one position
+          from its own row), so it systematically pushed the dial fit towards
+          rewriting *more* than the served metric wants -- measured as
+          ``fuzzynimia`` QR-Recall 0.316 -> 0.299 while ``prod_mrr`` rose.
+
+        One helper, so that the metric, the dial fit and the report cannot drift
+        into three protocols again -- QR-Recall already excluded the query
+        (``exclude_self=True``), which is why it disagreed with the dial about
+        the useful rewriting strength (fuzzynimia: 0.316 -> 0.299).
+        """
+        others = self._other_targets(probe)
+        never_valid = [[int(s)] for s, _d, _r in probe]
+        return others, never_valid
+
+    def _false_negative_mask(self, src, rel, dst, device):
+        """``[B, N]`` bool: True where a key is a *different* true target.
+
+        The graph is a multi-graph: a relation usually has several correct
+        objects for the same subject.  They must not be scored as negatives.
+        """
+        mask = torch.zeros(
+            (src.shape[0], self.num_nodes), dtype=torch.bool, device=device
+        )
+        src_cpu = src.detach().cpu().tolist()
+        rel_cpu = rel.detach().cpu().tolist()
+        dst_cpu = dst.detach().cpu().tolist()
+        rows = []
+        cols = []
+        for i, (s, r, d) in enumerate(zip(src_cpu, rel_cpu, dst_cpu)):
+            for c in self._targets_by_src_rel.get((s, r), ()):
+                if c != d:
+                    rows.append(i)
+                    cols.append(c)
+        if rows:
+            mask[
+                torch.tensor(rows, dtype=torch.long, device=device),
+                torch.tensor(cols, dtype=torch.long, device=device),
+            ] = True
+        return mask
+
+    def _sample_absent_relations(self, src, rel, tries: int = 8):
+        """Batch rows whose sampled relation is *absent* from that node.
+
+        Returns ``(rows, neg_rel)`` on the training device, or ``None`` when no
+        absent relation could be found (e.g. every node already carries every
+        relation type).
+        """
+        src_cpu = src.detach().cpu().tolist()
+        rows, negs = [], []
+        for i, s in enumerate(src_cpu):
+            valid = self._rels_by_node.get(s)
+            if not valid or len(valid) >= self.num_rel:
+                continue
+            for _ in range(tries):
+                candidate = random.randrange(self.num_rel)
+                if candidate not in valid:
+                    rows.append(i)
+                    negs.append(candidate)
+                    break
+        if not rows:
+            return None
+        device = self.cfg.device
+        return (
+            torch.tensor(rows, dtype=torch.long, device=device),
+            torch.tensor(negs, dtype=torch.long, device=device),
+        )
+
+    def _base_neighbour_pairs(self):
+        """``(anchor, neighbour, cos_reference)`` for the chart kNN graph.
+
+        The reference space is the **operator chart** ``base_to_op(base)``,
+        not the raw base embeddings: the refinement has ``op_dim`` dimensions
+        at its disposal and a 256-d orthogonal projection of a 1152-d space
+        cannot reproduce 1152-d cosines (the principal chart of the Slowosiec
+        carries 22 % of the variance).  Demanding base-space cosines would add
+        a constant, unattainable penalty to every pair.  Referenced to the
+        chart, the hinge is exactly satisfied by the identity refinement, so it
+        only fires when the refinement is what destroys the neighbourhood.
+
+        Built once and lazily: the scan is ``O(knn_anchors x num_nodes)`` and
+        is only paid for by runs that actually switch ``L_knn`` on.  Self
+        similarity is masked out by node id (a chunk row is *not* the same
+        index as its column).
+        """
+        cached = getattr(self, "_knn_pairs_cache", None)
+        if cached is not None:
+            return cached
+        k = max(1, int(self.cfg.knn_k))
+        anchors = max(1, min(int(self.cfg.knn_anchors), self.num_nodes))
+        with torch.no_grad():
+            base = self.model.base_to_op(self.model.node_emb_fixed)
+        x = base / base.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        gen = torch.Generator().manual_seed(self.cfg.seed + 11)
+        rows = torch.randperm(self.num_nodes, generator=gen)[:anchors].to(
+            base.device
+        )
+        src_parts, dst_parts, cos_parts = [], [], []
+        with torch.no_grad():
+            for start in range(0, rows.numel(), 512):
+                ids = rows[start:start + 512]
+                sim = x[ids] @ x.t()
+                sim.scatter_(1, ids.unsqueeze(1), float("-inf"))
+                values, indices = sim.topk(k, dim=-1)
+                src_parts.append(ids.repeat_interleave(k))
+                dst_parts.append(indices.reshape(-1))
+                cos_parts.append(values.reshape(-1))
+        cached = (
+            torch.cat(src_parts),
+            torch.cat(dst_parts),
+            torch.cat(cos_parts).clamp(-1.0, 1.0),
+        )
+        self._knn_pairs_cache = cached
+        return cached
+
+    def _knn_loss(self, refined: torch.Tensor) -> torch.Tensor:
+        """Hinge keeping base neighbours neighbours after refinement.
+
+        One-sided on purpose: the refinement may separate anything it has a
+        reason to separate, but a pair that the *base* index considered close
+        may not collapse below ``cos_base - knn_slack``.  This is the ranking
+        structure the retriever actually uses, which the pointwise ``L_anchor``
+        cannot express (a vector can sit on the sphere at the right distance
+        from its base position and still shuffle its whole neighbourhood).
+        """
+        src, dst, cos_base = self._base_neighbour_pairs()
+        n = min(int(self.cfg.knn_batch), src.numel())
+        if n == 0:
+            return refined.new_zeros(())
+        sel = torch.randint(0, src.numel(), (n,), device=src.device)
+        cos_refined = torch.nn.functional.cosine_similarity(
+            refined[src[sel]], refined[dst[sel]], dim=-1
+        )
+        gap = (cos_base[sel] - self.cfg.knn_slack - cos_refined).clamp_min(0.0)
+        return self.cfg.knn_weight * gap.mean()
+
+    def _pce_pools_build(self, size: int = 64, max_k: int = 3):
+        """Nested pools of paths of exactly 1..max_k hops.
+
+        The PCE *curve* is only meaningful if PCE(k) and PCE(k+1) are measured
+        on comparable inputs: sampling the k=1 pool from the edge list weights
+        it by relation frequency (``synonimia`` is half the graph, and its
+        targets are the nearest of all), while the k>=2 pools come out of a
+        random walk.  Here one walk per starting node contributes *every* one
+        of its prefixes, so the k=1 point is exactly the first hop of the same
+        walks that produce the k=2 and k=3 points.
+
+        The walk mirrors :class:`PathSampler` (no immediate return, no repeated
+        relation) with a private deterministic RNG.
+        """
+        adj = self.path_sampler.adjacency
+        nodes = [n for n, nbrs in adj.items() if nbrs]
+        if not nodes:
+            return {}
+        rng = random.Random(self.cfg.seed + 7)
+        prefixes: Dict[int, List[Tuple[int, List[int], int]]] = {
+            k: [] for k in range(1, max_k + 1)
+        }
+        tries = 0
+        max_tries = size * 400
+        while any(len(v) < size for v in prefixes.values()) and tries < max_tries:
+            tries += 1
+            start = nodes[rng.randrange(len(nodes))]
+            node, prev, prev_rel, chain = start, None, None, []
+            for _ in range(max_k):
+                options = [
+                    (d, r) for d, r in adj.get(node, ())
+                    if d != prev and r != prev_rel
+                ]
+                if not options:
+                    break
+                nxt, rel = rng.choice(options)
+                chain.append(rel)
+                prev, node = node, nxt
+                k = len(chain)
+                if len(prefixes[k]) < size:
+                    prefixes[k].append((start, list(chain), node))
+        device = self.cfg.device
+        pools = {}
+        for k, rows in prefixes.items():
+            if not rows:
+                continue
+            pools[k] = (
+                torch.tensor([r[0] for r in rows], dtype=torch.long, device=device),
+                torch.tensor([r[1] for r in rows], dtype=torch.long, device=device),
+                torch.tensor([r[2] for r in rows], dtype=torch.long, device=device),
+            )
+        return pools
+
+    def _pce_pool(self, k: int, size: int = 64):
+        """Fixed nested pool of paths of exactly ``k`` hops (built once)."""
+        cache = getattr(self, "_pce_pools", None)
+        if cache is None:
+            cache = self._pce_pools = self._pce_pools_build(size=size)
+        return cache.get(k)
 
     def _sample_paths(self, batch_size: int):
-        paths = self.path_sampler.sample_batch(batch_size)
+        """A batch of chains, all of the *same* length -- never zero-padded.
+
+        ``torch.zeros`` padding would put relation id 0 (``Pertainym`` in this
+        export) on top of every shorter chain: ``L_path`` then optimises
+        ``T_0 o T_0 o T_r2 o T_r1 (x_A) -> x_B`` for the ~75% of rows that were
+        padded, which is supervision against a wrong target (and the reason
+        PCE(2) stayed ~2.7x PCE(1)).
+        """
+        depth = self.path_sampler.pick_depth()
+        paths = self.path_sampler.sample_batch(batch_size, depth=depth)
+        if not paths:
+            paths = self.path_sampler.sample_batch(batch_size)
         if not paths:
             return None
+        k = min(len(p[1]) for p in paths)
+        paths = [p for p in paths if len(p[1]) == k]
         srcs = torch.tensor([p[0] for p in paths], dtype=torch.long)
-        k = max(len(p[1]) for p in paths)
-        rels = torch.zeros(len(paths), k, dtype=torch.long)
+        rels = torch.tensor([list(p[1]) for p in paths], dtype=torch.long)
         dsts = torch.tensor([p[2] for p in paths], dtype=torch.long)
-        for i, p in enumerate(paths):
-            rels[i, : len(p[1])] = torch.tensor(p[1])
         return srcs, rels, dsts
 
     def _sample_quadruples(self, batch_size: int):
-        quads = self.quad_sampler.sample_batch(batch_size)
-        if not quads:
-            return None
-        return quads
+        quads = self.quad_sampler.sample_batch_tensor(batch_size)
+        return quads  # [B, 8] long tensor or None (no closed quadruple)
 
     # ------------------------------------------------------------- forward
     def _step(self, edges, paths, quads, refined):
@@ -304,6 +968,9 @@ class WiazkaTrainer:
         src, dst, rel = edges[:, 0], edges[:, 1], edges[:, 2]
         x_a = refined[src]
         x_b = refined[dst]
+        # base embeddings carried into the operator chart (used by L_anchor and
+        # by the production term below; computed once per step)
+        chart = self.model.base_to_op(self.model.node_emb_fixed)
 
         # L_edge (+ applicability on positives)
         transformed = self.model.apply(x_a, rel)
@@ -313,32 +980,41 @@ class WiazkaTrainer:
         log["L_edge"] = float(l_edge.item())
 
         # L_anchor
-        base = self.model.base_to_op(self.model.node_emb_fixed)
         l_anchor = self.stability_loss(
-            refined, None, refined=refined, base=base
+            refined, None, refined=refined, base=chart
         )
         loss = loss + l_anchor
         log["L_anchor"] = float(l_anchor.item())
 
+        if self.cfg.knn_weight > 0:
+            l_knn = self._knn_loss(refined)
+            loss = loss + l_knn
+            log["L_knn"] = float(l_knn.item())
+
         if self.stage_manager.is_active("L_con"):
-            # in-batch contrast: query = T_r(x_A) (op space), keys = refined
-            neg_idx = self.neg_sampler.sample_pool(
-                list(dst.cpu().numpy()), k=self.cfg.num_neg
+            # Full-softmax contrast: query = T_r(x_A), keys = every refined
+            # node, target = x_B.  Sampling extra negatives on top of a key set
+            # that already contains *all* nodes only duplicated rows, and
+            # without the false-negative mask a second true target of the same
+            # (src, rel) was pushed away as if it were a negative -- the main
+            # source of gradient noise in this term (PLAN.md 2.4).
+            n_con = min(B, self.cfg.contrast_batch)
+            mask = self._false_negative_mask(
+                src[:n_con], rel[:n_con], dst[:n_con], device
             )
-            neg_nodes = torch.tensor(neg_idx, dtype=torch.long).to(device)
-            keys = torch.cat([refined, refined[neg_nodes]], dim=0)  # [N + B*K, D]
-            q = transformed
-            target_idx = torch.zeros(B, dtype=torch.long, device=device)  # x_B at row dst?
-            # x_B lives at refined[dst]; but keys rows 0..N-1 are all nodes, so
-            # target row index == dst value
-            target_idx = dst.clone()
-            l_con = self.contrast_loss(q, keys, target_idx)
+            # the subject is never the answer to its own relation: masking it
+            # keeps the loss from being trivially easy on self-loops of
+            # similarity (the query is already near T_r(x_a) in most relations)
+            mask[torch.arange(n_con, device=device), src[:n_con]] = True
+            l_con = self.contrast_loss(
+                transformed[:n_con], refined, dst[:n_con], mask=mask
+            )
             loss = loss + l_con
             log["L_con"] = float(l_con.item())
 
         if self.stage_manager.is_active("L_cycle"):
             t = self.model.apply(x_a, rel)
-            back = self.model.inverse(t, rel)
+            back = self.model.inverse(t, rel, base_point=x_a)
             l_cyc = self.stability_loss(x_a, back)
             loss = loss + l_cyc
             log["L_cycle"] = float(l_cyc.item())
@@ -358,15 +1034,13 @@ class WiazkaTrainer:
             p_xb = refined[p_dst]
             chain_t = self.model.apply_chain(p_xa, p_rels)
             l_path = self.path_loss(chain_t, None, p_xb)
-            loss = loss + l_path
+            loss = loss + self.cfg.path_weight * l_path
             log["L_path"] = float(l_path.item())
 
-        if self.stage_manager.is_active("L_curv") and quads:
-            a = torch.tensor([d.a for d in quads], dtype=torch.long, device=device)
-            r = torch.tensor([d.r for d in quads], dtype=torch.long, device=device)
-            q = torch.tensor([d.q for d in quads], dtype=torch.long, device=device)
-            p = torch.tensor([d.p for d in quads], dtype=torch.long, device=device)
-            s = torch.tensor([d.s for d in quads], dtype=torch.long, device=device)
+        if self.stage_manager.is_active("L_curv") and quads is not None:
+            # diamond columns: (a, r, c, q, d, p, b, s) -- see sampler FIELDS
+            cols = [quads[:, i].to(device) for i in (0, 1, 3, 5, 7)]
+            a, r, q, p, s = cols
             xa = refined[a]
             # holonomy around the diamond: H = T_p^-1 o T_s^-1 o T_q o T_r
             h = self.model.apply(xa, r)
@@ -381,13 +1055,14 @@ class WiazkaTrainer:
             log["L_curv"] = float(l_curv.item())
 
         if self.stage_manager.is_active("L_commut"):
-            # the commutation matrix C_rs has no gradient that keeps it away
-            # from 0 in the unsupervised penalty, so it is taught from the
-            # graph: relation pairs whose two routes meet are commuting.
+            # the commutation matrix C_rs is taught exclusively from the
+            # graph: relation pairs whose two routes meet (positives) vs pairs
+            # with no witness (negatives), drawn from the EXHAUSTIVE witness
+            # table and balanced per step.
             pos_pairs, neg_pairs = self.quad_sampler.sample_relation_pairs(
                 batch_size=16, max_neg=16
             )
-            if pos_pairs:
+            if pos_pairs or neg_pairs:
                 l_comm = self.curvature_loss.supervision(pos_pairs, neg_pairs)
                 loss = loss + l_comm
                 log["L_commut"] = float(l_comm.item())
@@ -397,32 +1072,47 @@ class WiazkaTrainer:
             z_base = self._shadow_cache[: min(self.cfg.shadow_batch, self._shadow_cache.shape[0])]
             z = self.model.base_to_op(z_base)
             r_sh = torch.randint(0, self.num_rel, (z.shape[0],), device=device)
-            back = self.model.inverse(self.model.apply(z, r_sh), r_sh)
+            z_fwd = self.model.apply(z, r_sh)
+            back = self.model.inverse(z_fwd, r_sh, base_point=z)
             l_sh_cyc = self.shadow_loss.cycle(z, back)
             s_sh = (r_sh + 1) % self.num_rel
             trst = self.model.apply(self.model.apply(z, r_sh), s_sh)
             tstr = self.model.apply(self.model.apply(z, s_sh), r_sh)
-            l_sh_com = self.shadow_loss.commute(trst, tstr)
+            c_sh = self.curvature_loss.commutation()[r_sh, s_sh]
+            l_sh_com = self.shadow_loss.commute_gated(trst, tstr, c_sh)
             loss = loss + l_sh_cyc + l_sh_com
             log["L_shadow_cycle"] = float(l_sh_cyc.item())
             log["L_shadow_commut"] = float(l_sh_com.item())
 
         if self.stage_manager.is_active("L_pull"):
-            # exporting a transformed vector must preserve its neighbourhood
-            # in the retriever space (base vectors are the index)
-            p_trans = self.model.to_retriever_space(transformed)
-            base = self.model.node_emb_fixed
-            cos_pos = torch.nn.functional.cosine_similarity(
-                p_trans, base[dst], dim=-1
+            # The *production* objective: the vector database holds the base
+            # embeddings, so an exported transformed query has to retrieve the
+            # gold node out of that index.  Scored with the same full softmax
+            # (and the same false-negative / subject masking) as the ``prod_*``
+            # eval protocol, and fed from the same input the product uses --
+            # ``chart(base)`` rather than the refined node -- so that nothing
+            # separates the trained objective from the deployed one.
+            #
+            # The previous version was a ``(1 - cos)`` margin against the gold
+            # plus 8 *random* negatives: with 243k nodes, random negatives are
+            # almost always trivially dissimilar, so the term nearly vanished
+            # and left the whole gap between ``eval/mrr`` (0.19) and
+            # ``eval/prod_mrr`` (0.11) unoptimised.
+            n_pull = min(B, self.cfg.pull_batch)
+            q_pull = self.model.production_query(
+                self.model.node_emb_fixed[src[:n_pull]], rel[:n_pull]
             )
-            neg_rows = torch.randint(
-                0, base.shape[0], (B, self.cfg.num_neg), device=device
+            mask_pull = self._false_negative_mask(
+                src[:n_pull], rel[:n_pull], dst[:n_pull], device
             )
-            cos_neg = torch.nn.functional.cosine_similarity(
-                p_trans.unsqueeze(1), base[neg_rows], dim=-1
+            mask_pull[torch.arange(n_pull, device=device), src[:n_pull]] = True
+            l_pull = self.contrast_loss(
+                q_pull,
+                self.model.node_emb_fixed,
+                dst[:n_pull],
+                mask=mask_pull,
             )
-            l_pull = (1.0 - cos_pos).mean() + cos_neg.mean().clamp_min(0.0) * 0.5
-            loss = loss + l_pull
+            loss = loss + self.cfg.pull_weight * l_pull
             log["L_pull"] = float(l_pull.item())
 
         if self.stage_manager.is_active("L_decoder"):
@@ -432,14 +1122,22 @@ class WiazkaTrainer:
             log["L_decoder"] = float(l_dec.item())
 
         if self.stage_manager.is_active("L_applicability"):
-            # negatives: applicability should be low on type-invalid pairs
-            neg_rel = (rel + torch.randint(1, self.num_rel, (B,), device=device)) % self.num_rel
-            a_neg = self.model.applicability_score(x_a, neg_rel)
-            l_app = nn.functional.binary_cross_entropy_with_logits(
-                a_neg, torch.zeros_like(a_neg)
-            )
-            loss = loss + l_app
-            log["L_applicability"] = float(l_app.item())
+            # Negatives are relation types the source node genuinely does NOT
+            # participate in.  The previous rule took "any other relation id",
+            # which for a wordnet labels perfectly valid relations as invalid
+            # (one synset typically carries several relation types at once) and
+            # so trained the head on mostly wrong labels.
+            neg_pairs = self._sample_absent_relations(src, rel)
+            if neg_pairs is not None:
+                rows, neg_rel = neg_pairs
+                a_neg = self.model.applicability_score(
+                    x_a.index_select(0, rows), neg_rel
+                )
+                l_app = nn.functional.binary_cross_entropy_with_logits(
+                    a_neg, torch.zeros_like(a_neg)
+                )
+                loss = loss + l_app
+                log["L_applicability"] = float(l_app.item())
 
         return loss, log
 
@@ -448,11 +1146,17 @@ class WiazkaTrainer:
         epochs = epochs or self.cfg.epochs
         history: List[Dict] = []
         self.history = history
-        self.model.train()
         global_step = 0
+        steps_per_epoch = max(1, len(self.edges) // self.cfg.batch_size)
+        self._build_scheduler(steps_per_epoch, epochs)
+        best_score = float("-inf")
+        best_step = 0
         for epoch in range(1, epochs + 1):
             epoch_log: Dict[str, float] = {}
-            for _ in range(self.cfg.epochs if epochs == self.cfg.epochs else 1):
+            # an epoch walks the edge set once; dropout must be ON while we
+            # actually train (evaluate() flips the model to eval mode)
+            self.model.train()
+            for _ in range(steps_per_epoch):
                 edges = self._sample_edges(self.cfg.batch_size).to(self.cfg.device)
                 paths = self._sample_paths(self.cfg.batch_size // 2)
                 if paths is not None:
@@ -464,8 +1168,14 @@ class WiazkaTrainer:
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.model.parameters())
+                    + list(self.curvature_loss.parameters()),
+                    1.0,
+                )
                 self.optimizer.step()
+                if self._scheduler is not None:
+                    self._scheduler.step()
 
                 global_step += 1
                 self.stage_manager.step()
@@ -473,29 +1183,128 @@ class WiazkaTrainer:
                     epoch_log[k] = epoch_log.get(k, 0.0) + v
                 if global_step % log_every == 0:
                     print(
-                        f"[epoch {epoch} step {global_step}] "
+                        f"[epoch {epoch} step {global_step}/{steps_per_epoch}] "
                         f"stage={self.stage_manager.order[self.stage_manager.current]} "
-                        f"loss={float(loss.item()):.5f}"
+                        f"loss={float(loss.item()):.5f} "
+                        f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
                     )
-            n = max(1, self.cfg.epochs)
+            n = max(1, steps_per_epoch)
             avg = {k: v / n for k, v in epoch_log.items()}
             avg["epoch"] = epoch
             avg["stage"] = self.stage_manager.order[self.stage_manager.current]
 
             # stage acceptance is measured on eval metrics, not train losses
-            eval_metrics = self.evaluate(n_probe=min(128, max(16, len(self.edges))))
+            eval_metrics = self.evaluate()
             avg.update(eval_metrics)
             history.append(avg)
-            if self.stage_manager.should_stop(eval_metrics):
-                print(
-                    f"[stage] {self.stage_manager.order[self.stage_manager.current]}"
-                    f" -> gate passed, advancing"
+            headline = [
+                "eval/mrr", "eval/mrr_macro", "eval/id_mrr",
+                "eval/mrr_lift", "eval/raw_mrr", "eval/mrr_vs_raw",
+                "eval/prod_mrr", "eval/mrr_prod_lift", "eval/hits@1",
+                "eval/anchor", "eval/knn_cos_refined",
+                "eval/rel_acc_macro", "eval/rel_acc_macro_ensemble",
+                "eval/path_lift", "eval/eps",
+                "eval/pce_k1", "eval/pce_k2", "eval/pce_ratio_k2",
+            ]
+            # one epoch per line is the only place a dead term shows up: keep
+            # the line short when a metric does not exist yet
+            headline = [k for k in headline if k in eval_metrics]
+            print(
+                f"[epoch {epoch}] "
+                + " ".join(
+                    f"{k}={eval_metrics[k]:.4f}"
+                    for k in headline
+                    if k in eval_metrics
                 )
+                + f" | lr={self.optimizer.param_groups[0]['lr']:.2e}"
+            )
+            score = self.selection_score(eval_metrics)
+            if score > best_score:
+                best_score, best_step = score, global_step
+                try:
+                    self.save(f"{self.cfg.save_dir}/best", metrics=eval_metrics)
+                except Exception as exc:  # keep training even if disk fails
+                    print(f"[ckpt] best save failed: {exc}")
+            if self.stage_manager.should_stop(eval_metrics):
+                name = self.stage_manager.order[self.stage_manager.current]
+                reason = (
+                    "gate passed"
+                    if self.stage_manager.gate_passed(eval_metrics)
+                    else "max_steps reached (gate NOT met)"
+                )
+                print(f"[stage] {name} -> {reason}, advancing")
                 self.stage_manager.advance()
                 self._sync_stage_state()
+        self.best_step = best_step
+        self.best_score = best_score
+        print(f"[train] best held-out score {best_score:.4f} @ step {best_step}")
         return history
 
+    # ------------------------------------------------------------- selection
+    @staticmethod
+    def selection_score(metrics: Dict[str, float]) -> float:
+        """Best-checkpoint criterion: rank well, on every relation, and stay
+        usable from the retriever.
+
+        * ``eval/mrr``      -- filtered MRR of ``T_r`` over the refined index;
+        * ``eval/mrr_macro``-- the same averaged per relation, so a checkpoint
+          that trades a rare relation for ``synonimia`` cannot win;
+        * ``eval/prod_mrr`` -- the production protocol (export into the base
+          space the vector database actually holds).  Weighted lower because it
+          is the downstream property, but it must be part of the criterion: a
+          model that ranks well only inside the operator space and exports to
+          noise is not shippable (measured: QR-Recall after = 0.0 for every
+          relation while the graph metrics looked fine);
+        * ``eval/rel_acc_macro`` -- macro top-1 accuracy of the relation
+          decoder: can the model *name* the relation between two nodes, on
+          every relation and not only on the dominant one.
+        """
+        return (
+            0.42 * metrics.get("eval/mrr", 0.0)
+            + 0.25 * metrics.get("eval/mrr_macro", 0.0)
+            + 0.18 * metrics.get("eval/prod_mrr", 0.0)
+            + 0.15 * metrics.get("eval/rel_acc_macro_ensemble",
+                                 metrics.get("eval/rel_acc_macro", 0.0))
+        )
+
+    #: deprecated alias kept for callers written against the private name
+    _selection_score = selection_score
+
     # ---------------------------------------------------------------- storage
+    def load_weights_from(self, ckpt_dir: str) -> Dict[str, Any]:
+        """Restore weights saved by :meth:`save` into the live model.
+
+        Training keeps the best-scoring checkpoint under ``<save-dir>/best``,
+        but the run reported (and shipped) the weights the last epoch happened
+        to leave behind.  This makes the reported numbers describe the artifact
+        that is actually loaded by ``RelationFlow.load``.
+
+        The graph buffers are part of the state dict and the base embeddings are
+        frozen, so nothing else has to be rebuilt; keys the checkpoint predates
+        keep their current value.
+        """
+        from relgat_projector.handlers.wiazka_checkpoint import load_checkpoint
+
+        model, _rel2idx, _spec, meta = load_checkpoint(
+            ckpt_dir, device=self.cfg.device)
+        # the calibration scalars are attributes, not parameters: copy them too,
+        # or the live model mixes its evidences differently from the checkpoint
+        for name in ("relation_ensemble_weight", "relation_prior_strength"):
+            if hasattr(model, name):
+                setattr(self.model, name, float(getattr(model, name)))
+        result = self.model.load_state_dict(model.state_dict(), strict=False)
+        del model
+        if result.unexpected_keys:
+            raise RuntimeError(
+                f"checkpoint {ckpt_dir} does not match this model: "
+                f"unexpected={list(result.unexpected_keys)[:8]}"
+            )
+        if result.missing_keys:
+            print(f"[ckpt] {len(result.missing_keys)} tensors kept from "
+                  f"initialisation: {list(result.missing_keys)[:6]}")
+        self.model.eval()
+        return meta
+
     def save(self, ckpt_dir: str, metrics: Optional[Dict[str, float]] = None) -> str:
         """Persist model + config + the learned commutation matrix C_rs."""
         from relgat_projector.handlers.wiazka_checkpoint import save_checkpoint
@@ -508,11 +1317,25 @@ class WiazkaTrainer:
             self.rel2idx,
             config={
                 **dataclasses.asdict(self.cfg),
+                # the curriculum switches the connection on at F4, so the
+                # configured value is not the architecture of what is being
+                # saved: a checkpoint written as ``use_context: False`` but
+                # carrying a trained ``ctx_P`` rebuilds as a different model
+                "use_context": bool(
+                    getattr(self.model.operator, "use_context",
+                            self.cfg.use_context)),
                 "num_nodes": self.num_nodes,
                 "num_edges": len(self.edges),
                 "stage": self.stage_manager.order[self.stage_manager.current],
+                # the ensemble weight was fitted on train edges and is part of
+                # the served relation classifier, so it has to travel with the
+                # checkpoint (RelationFlow.load restores it)
+                "relation_ensemble_weight": float(
+                    getattr(self.model, "relation_ensemble_weight", 1.0)),
+                "relation_prior_strength": float(
+                    getattr(self.model, "relation_prior_strength", 1.0)),
             },
-            commutation=self.curvature_loss.commutation(),
+            commutation=self.curvature_loss.commutation().cpu(),
             metrics=metrics if metrics is not None else last,
         )
 
@@ -539,7 +1362,7 @@ class WiazkaTrainer:
         from relgat_projector.core.metrics.query_rewriting import gold_pairs, qr_recall
 
         scored = self.eval_edges if (use_heldout and self.eval_edges) else self.edges
-        index = self.node_emb.to(self.cfg.device)
+        index = self._node_emb_dev
         gen = torch.Generator().manual_seed(self.cfg.seed)
         out: Dict[str, Dict[str, float]] = {}
         for name in rel_names:
@@ -554,13 +1377,19 @@ class WiazkaTrainer:
             result = qr_recall(
                 pairs,
                 index,
-                transform=lambda x, rid=rid: self.model.to_retriever_space(
-                    self.model.apply(self.model.base_to_op(x),
-                                     torch.full((x.shape[0],), rid,
-                                                dtype=torch.long, device=index.device))
+                # the served path, dial included: QR-Recall has to measure what
+                # the rewriter actually sends, not a neighbouring function
+                transform=lambda x, rid=rid: self.model.production_query(
+                    x, torch.full((x.shape[0],), rid, dtype=torch.long,
+                                  device=index.device)
                 ),
                 ks=ks,
                 filter_others=filter_others,
+                # filter against the graph, not against the sample: a query
+                # with 40 true synonyms that appears once in the probe had no
+                # filtering at all and scored 39 correct answers as misses
+                other_map={int(q): self._targets_by_src_rel.get((int(q), rid), ())
+                           for q, _a in pairs} if filter_others else None,
                 relation=name,
                 chain=(rid,),
             )
@@ -568,55 +1397,493 @@ class WiazkaTrainer:
         return out
 
     # ---------------------------------------------------------------- eval
+    def _probe_edges(self, n_probe: Optional[int] = None):
+        """Deterministic, relation-stratified, ``(src, rel)``-unique probe.
+
+        Held-out edges only.  Stratification matters: ``synonimia`` carries
+        half the graph, so a uniform probe scores one relation, caps hits@1
+        near the multiplicity ceiling of that one relation, and never shows
+        what happened to the ~30 relations with fewer than 100 edges.
+        """
+        scored = self.eval_edges if self.eval_edges else self.edges
+        probe = stratified_edge_probe(
+            scored, n_probe or self.cfg.probe_size, seed=self.cfg.seed
+        )
+        seen = set()
+        deduped = []
+        for s, d, r in probe:
+            if (s, r) in seen:
+                continue
+            seen.add((s, r))
+            deduped.append((s, d, r))
+        return deduped
+
     @torch.no_grad()
-    def evaluate(self, n_probe: int = 256) -> Dict[str, float]:
+    def _transport_prior_stats(self, refined: torch.Tensor, n: int = 512):
+        """``(mean, std)`` per relation of ``cos(T_r u, v)`` over random pairs.
+
+        A relation whose transport is nearly the identity scores high on
+        *everything*, so raw transport fidelity ranks the easy relations first.
+        Calibrating against the score a relation gives on random pairs is the
+        transport counterpart of the class prior; measured on the Słowosieć it
+        is worth +0.04 macro relation accuracy, and without it the transport
+        scorer is worse than the trained head.
+        """
+        gen = torch.Generator().manual_seed(self.cfg.seed + 21)
+        idx_a = torch.randint(
+            0, self.num_nodes, (min(n, self.num_nodes),), generator=gen
+        ).to(refined.device)
+        idx_b = torch.randint(
+            0, self.num_nodes, (min(n, self.num_nodes),), generator=gen
+        ).to(refined.device)
+        scores = self.model.transport_relation_scores(
+            refined[idx_a], refined[idx_b])
+        return scores.mean(dim=0), scores.std(dim=0).clamp_min(1e-6)
+
+    @torch.no_grad()
+    def fit_relation_prior_strength(
+        self,
+        refined: torch.Tensor,
+        train_counts: torch.Tensor,
+        n_pairs: int = 4096,
+        grid: Sequence[float] = PRIOR_STRENGTH_GRID,
+    ) -> float:
+        """Fit the strength of the training-frequency correction of the head.
+
+        ``mode="prior"`` subtracts ``strength * log p_train(r)`` from the head's
+        log-probabilities.  ``1.0`` is right for plain cross-entropy; a head
+        trained with class weights ``w(r) ~ count**-beta`` fits
+        ``p(r|x) * w(r)`` and therefore needs ``+beta * log count``, i.e. the
+        opposite sign -- which is why the fixed ``1.0`` scored macro 0.058
+        against 0.465 uncorrected once the decoder was balanced.  One scalar on
+        **train** edges covers both regimes (``0`` = trust the balanced head).
+        """
+        if not self.edges:
+            return float(self.model.relation_prior_strength)
+        gen = torch.Generator().manual_seed(self.cfg.seed + 31)
+        n = min(int(n_pairs), len(self.edges))
+        pick = torch.randperm(len(self.edges), generator=gen)[:n]
+        edges = self.edge_tensor[pick].to(refined.device)
+        src, dst, rel = edges[:, 0], edges[:, 1], edges[:, 2]
+        logits = self.model.relation_logits(refined[src], refined[dst],
+                                            mode="decoder")
+        counts = train_counts.to(logits.device).clamp_min(1.0).float()
+        log_prior = torch.log(counts / counts.sum())
+
+        best_strength, best_acc = 0.0, -1.0
+        for strength in grid:
+            pred = (logits - float(strength) * log_prior).argmax(dim=-1)
+            acc = macro_relation_accuracy(pred, rel, self.num_rel)
+            if acc > best_acc + 1e-9:
+                best_strength, best_acc = float(strength), acc
+        self.model.relation_prior_strength = best_strength
+        return best_strength
+
+    @torch.no_grad()
+    def fit_relation_ensemble_weight(
+        self,
+        refined: torch.Tensor,
+        score_stats: Tuple[torch.Tensor, torch.Tensor],
+        n_pairs: int = 4096,
+        grid: Sequence[float] = ENSEMBLE_WEIGHT_GRID,
+    ) -> float:
+        """Fit the weight of the transport evidence in the relation ensemble.
+
+        Which evidence deserves to win depends on how the head was trained.  With
+        plain cross-entropy the transport was the better of the two (0.295 macro
+        against 0.285 for the head) and an equal-weight ensemble beat both;
+        class-balancing the head reversed the order (0.49 against 0.42), so the
+        fixed equal weighting shipped a relation classifier *worse* than the head
+        it blended.  One scalar fitted on **train** edges settles it the same way
+        :meth:`calibrate_transport_dial` settles the dial -- the held-out probe
+        stays untouched.
+        """
+        if not self.edges:
+            return float(self.model.relation_ensemble_weight)
+        gen = torch.Generator().manual_seed(self.cfg.seed + 33)
+        n = min(int(n_pairs), len(self.edges))
+        pick = torch.randperm(len(self.edges), generator=gen)[:n]
+        edges = self.edge_tensor[pick].to(refined.device)
+        src, dst, rel = edges[:, 0], edges[:, 1], edges[:, 2]
+        # the head evidence exactly as the ensemble sees it, i.e. with the prior
+        # correction of :meth:`fit_relation_prior_strength` already applied
+        head = self.model.relation_logits(
+            refined[src], refined[dst], mode="prior",
+            train_counts=self._relation_counts.to(refined.device))
+        transport = self.model.relation_logits(
+            refined[src], refined[dst], mode="transport",
+            score_stats=score_stats)
+        alpha = fit_ensemble_weight(head, transport, rel, self.num_rel, grid)
+        self.model.relation_ensemble_weight = alpha
+        return alpha
+
+    @torch.no_grad()
+    def calibrate_transport_dial(
+        self,
+        n_per_rel: int = 256,
+        grid: Optional[Sequence[float]] = None,
+        edges: Optional[List[Tuple[int, int, int]]] = None,
+        smooth: int = 3,
+    ) -> Dict[int, float]:
+        """Fit the per-relation rewriting strength on training edges.
+
+        ``L_pull`` trains ``lam_r`` through 256 sampled queries per step, and
+        measured over a whole 35-epoch run every dial ended where it started
+        (``lam ~ 0.81`` for all 56 relations): one scalar per relation, a weak
+        and noisy gradient, and a loss whose derivative against ``lam`` is close
+        to flat in the middle of the mixture.  This is the direct version of the
+        same fit -- for every relation scan a grid of ``lam`` and keep the value
+        that ranks the gold node best in the base index, which is the quantity
+        the product reports.
+
+        It is fitted on **train** edges (up to ``n_per_rel`` per relation) and
+        is one parameter per relation, so it does not touch the held-out set the
+        reported numbers come from.  Returns ``{relation_id: lam}``.
+        """
+        if grid is None:
+            grid = [round(0.1 * i, 1) for i in range(11)]
+        source = self.edges if edges is None else edges
+        grouped: Dict[int, List[Tuple[int, int]]] = {}
+        for s_, d_, r_ in source:
+            grouped.setdefault(int(r_), []).append((int(s_), int(d_)))
+        # spread over each relation instead of taking its first edges (see
+        # ``spread_sample``): the dial is one scalar per relation fitted from
+        # ~100 examples, so which 100 decides what it describes
+        by_rel = {r: spread_sample(rows, n_per_rel, seed=self.cfg.seed + r)
+                  for r, rows in grouped.items()}
+        base = self._node_emb_dev
+        dial = self.model.transport_dial
+        original = dial.detach().clone()
+        chosen: Dict[int, float] = {}
+        for r, rows in sorted(by_rel.items()):
+            src = torch.tensor([p[0] for p in rows], device=base.device)
+            dst = torch.tensor([p[1] for p in rows], device=base.device)
+            rel = torch.full((len(rows),), r, dtype=torch.long, device=base.device)
+            # exactly the protocol of ``evaluate()``/``_rank_mask`` (one source
+            # of truth): the query row is not a candidate, so ``lam = 0`` is
+            # reachable and the dial optimises the quantity that is reported
+            others = [
+                [c for c in self._targets_by_src_rel.get((int(s), r), ())
+                 if c != int(d)]
+                for s, d in rows
+            ]
+            never_valid = [[int(s)] for s, _d in rows]
+            curve: List[float] = []
+            for lam in grid:
+                dial[r] = float(torch.logit(torch.tensor(float(lam))
+                                            .clamp(1e-3, 1 - 1e-3)))
+                query = self.model.production_query(base[src], rel)
+                _, ranks = filtered_ranking(query, base, dst,
+                                            other_targets=others,
+                                            never_valid=never_valid)
+                curve.append(float(ranks.float().reciprocal().mean().item()))
+            # ties go to the first (smallest) lambda: rewriting is the risky
+            # direction, so an equal score keeps the milder one
+            scores = smooth_curve(curve, smooth)
+            best_i = max(range(len(scores)), key=lambda i: (scores[i], -i))
+            chosen[r] = float(grid[best_i])
+            dial[r] = float(torch.logit(torch.tensor(chosen[r])
+                                        .clamp(1e-3, 1 - 1e-3)))
+        # relations with no training edge keep whatever they had
+        for r in range(self.num_rel):
+            if r not in chosen:
+                dial[r] = original[r]
+        return chosen
+
+    @torch.no_grad()
+    def evaluate(self, n_probe: Optional[int] = None) -> Dict[str, float]:
         from relgat_projector.core.metrics import geometry
+        from relgat_projector.core.metrics.ranking import (
+            edge_probe,
+            filtered_ranking,
+            macro_mrr,
+        )
 
         self.model.eval()
         refined = self.model.refine()
         device = self.cfg.device
-        # held-out edges when available: gates must not fire on training data
-        scored = self.eval_edges if self.eval_edges else self.edges
-        probe = torch.randint(0, len(scored), (min(n_probe, len(scored)),))
-        e = torch.tensor(scored, dtype=torch.long)[probe].to(device)
+        probe = self._probe_edges(n_probe)
+        e = torch.tensor(probe, dtype=torch.long).to(device)
         src, dst, rel = e[:, 0], e[:, 1], e[:, 2]
         x_a = refined[src]
         x_b = refined[dst]
         transformed = self.model.apply(x_a, rel)
         cos = torch.nn.functional.cosine_similarity(transformed, x_b, dim=-1)
-        base = self.model.base_to_op(self.model.node_emb_fixed)
+        base_op = self.model.base_to_op(self.model.node_emb_fixed)
         out: Dict[str, float] = {
             "eval/cos_edge": float(cos.mean().item()),
             # refinement must stay near the base embedding (F1 gate, PLAN 4)
             "eval/anchor": float(
                 torch.nn.functional.cosine_similarity(
-                    refined, base, dim=-1
+                    refined, base_op, dim=-1
                 ).mean().item()
             ),
             "eval/cce": geometry.cycle_closure_error(
                 self.model.operator, x_a, rel
             ),
             "eval/isot": geometry.isometry_error(
-                self.model.operator, refined[src[:64]], refined[dst[:64]], rel[0]
+                self.model.operator, x_a[:64], x_b[:64], rel[:64]
             ),
         }
-        # PCE curve: for each k, sample paths of *exactly* length k
+        # the answer list excludes the query itself and the other true targets
+        # (the contrast term does the same), so every protocol -- graph,
+        # production and QR-Recall -- compares like with like
+        others, never_valid = self._rank_mask(probe)
+
+        def score(query, index, prefix):
+            ranking, ranks = filtered_ranking(
+                query, index, dst, other_targets=others,
+                never_valid=never_valid)
+            for key, value in ranking.items():
+                if key != "n":
+                    out[f"eval/{prefix}{key}"] = value
+            macro = macro_mrr(ranks, rel.detach().cpu().tolist())
+            out[f"eval/{prefix}mrr_macro"] = macro["mrr_macro"]
+            if not prefix:
+                out["eval/num_relations"] = macro["num_relations"]
+            return ranks
+
+        # (1) graph protocol: T_r over the refined index, plus the identity
+        # transport on the *same* index.  Comparing the model with a baseline
+        # scored on a different index (the base embeddings) mixes "the
+        # transport is good" with "refinement moved the index", which is what
+        # made the old headline lift meaningless: refinement alone was worth
+        # +0.19 MRR on antonimia and -0.03 on synonimia at the same time.
+        score(transformed, refined, "")
+        score(refined[src], refined, "id_")
+        # (1b) the same identity transport over the *unrefined* chart.  Without
+        # this row ``id_mrr`` conflates two very different losses -- what the
+        # 256-d chart cannot represent at all, and what the refinement destroys
+        # on top of it.  ``chart_mrr`` is the ceiling the refinement starts
+        # from, so ``id_mrr - chart_mrr`` is pure refinement damage.
+        score(base_op[src], base_op, "chart_")
+        # (2) production protocol: the retriever index is the base embeddings
+        # (what the vector database holds) and the query goes through
+        # export(T_r(base_to_op(base_x)))  (PLAN.md 5)
+        q_prod = self.model.production_query(self._node_emb_dev[src], rel)
+        score(q_prod, self._node_emb_dev, "prod_")
+        score(self._node_emb_dev[src], self._node_emb_dev, "raw_")
+
+        # (2c) the same production query on a probe drawn the way traffic is
+        # distributed.  The stratified probe is how a *rare* relation is judged;
+        # it is not what a deployed rewriter is judged by, because ``synonimia``
+        # carries half of the edges and the stratified average gives it 1/56 of
+        # the vote.  A dial that over-wrote ``synonimia`` cost 0.20 MRR there and
+        # 0.004 in the stratified number -- which is exactly how the defect
+        # stayed invisible.  Both views are reported; neither is enough alone.
+        traffic_source = self.eval_edges if self.eval_edges else self.edges
+        traffic = edge_probe(traffic_source, self.cfg.probe_size,
+                             seed=self.cfg.seed + 7)
+        if len(traffic) > 1:
+            et = torch.tensor(traffic, dtype=torch.long).to(device)
+            t_src, t_dst, t_rel = et[:, 0], et[:, 1], et[:, 2]
+            t_others, t_never = self._rank_mask(traffic)
+            t_prod = self.model.production_query(self._node_emb_dev[t_src], t_rel)
+            stats, _ = filtered_ranking(
+                t_prod, self._node_emb_dev, t_dst,
+                other_targets=t_others, never_valid=t_never)
+            raw_stats, _ = filtered_ranking(
+                self._node_emb_dev[t_src], self._node_emb_dev, t_dst,
+                other_targets=t_others, never_valid=t_never)
+            out["eval/prod_mrr_traffic"] = stats["mrr"]
+            out["eval/raw_mrr_traffic"] = raw_stats["mrr"]
+            out["eval/mrr_prod_lift_traffic"] = (
+                stats["mrr"] - raw_stats["mrr"])
+
+        out["eval/n_probe"] = float(len(probe))
+        # the transport's own contribution, measured on one index
+        out["eval/mrr_lift"] = out["eval/mrr"] - out["eval/id_mrr"]
+        # the whole model against "just use the raw embedding"
+        out["eval/mrr_vs_raw"] = out["eval/mrr"] - out["eval/raw_mrr"]
+        # what the exported query adds in the retriever (the product property)
+        out["eval/mrr_prod_lift"] = out["eval/prod_mrr"] - out["eval/raw_mrr"]
+
+        # PCE curve on a FIXED pool of paths per depth.  Drawing new random
+        # walks at every eval made the curve incomparable between epochs (and
+        # cost thousands of Python walks per eval).
         for k in range(1, 4):
-            paths = []
-            tries = 0
-            while len(paths) < 32 and tries < 2000:
-                tries += 1
-                p = self.path_sampler.sample()
-                if p is not None and len(p[1]) == k:
-                    paths.append(p)
-            if not paths:
+            pool = self._pce_pool(k)
+            if pool is None:
                 continue
-            psrc = torch.tensor([p[0] for p in paths], dtype=torch.long, device=device)
-            prels = torch.tensor([p[1] for p in paths], dtype=torch.long, device=device)
-            pdst = torch.tensor([p[2] for p in paths], dtype=torch.long, device=device)
+            psrc, prels, pdst = pool
             chain_t = self.model.apply_chain(refined[psrc], prels)
-            cos = torch.nn.functional.cosine_similarity(
+            cos_k = torch.nn.functional.cosine_similarity(
                 chain_t, refined[pdst], dim=-1
             )
-            out[f"eval/pce_k{k}"] = float((1.0 - cos).mean().item())
+            out[f"eval/pce_k{k}"] = float((1.0 - cos_k).mean().item())
+            if k == 2:
+                # cosine error says nothing about whether the composition is
+                # *usable*: rank the two-hop target among all nodes, by the
+                # chain transport and by the identity transport on the same
+                # index.  ``path_lift`` is the F3 acceptance criterion -- the
+                # old gate (pce_ratio_k2 <= 1.6) asks for composition error
+                # *below* one step's, which no non-trivial operator achieves
+                # (two independent angular errors add up to ratio ~2.0 by
+                # construction), so F3 always exited through the max_steps
+                # valve after 10 epochs and the export/decoder stage lost a
+                # third of every run.
+                chain_rank, _ = filtered_ranking(chain_t, refined, pdst)
+                ident_rank, _ = filtered_ranking(refined[psrc], refined, pdst)
+                out["eval/path_mrr"] = chain_rank["mrr"]
+                out["eval/path_mrr_ident"] = ident_rank["mrr"]
+                out["eval/path_lift"] = chain_rank["mrr"] - ident_rank["mrr"]
+        # strength of the connection (PLAN.md 1.3): 0 when the operator has no
+        # context.  Logged because an unlearnable eps is invisible everywhere
+        # else -- the transport stays numerically the same and no loss complains.
+        out["eval/eps"] = float(getattr(self.model.operator, "eps", 0.0))
+        # composition must not degrade transport much faster than one step
+        # does; the ratio is scale-free, unlike an absolute PCE threshold, so
+        # it stays valid while the whole curve is still improving
+        pce1 = out.get("eval/pce_k1")
+        pce2 = out.get("eval/pce_k2")
+        if pce1 is not None and pce2 is not None:
+            out["eval/pce_ratio_k2"] = float(pce2 / max(pce1, 1e-6))
+
+        # --- neighbourhood preservation (the property L_knn optimises) -----
+        # ``knn_cos_chart`` is the mean cosine of chart-neighbour pairs before
+        # refinement, ``knn_cos_refined`` after it.  A ratio below 1 says the
+        # refinement is spending the index to buy edge accuracy -- which is
+        # exactly the trade that made identity transport score *below* the raw
+        # embeddings.  Measured on the reference run: 0.62 -> 0.41.
+        if self.num_nodes > 1:
+            src_n, dst_n, cos_chart_n = self._base_neighbour_pairs()
+            n_pairs = min(8192, src_n.numel())
+            out["eval/knn_cos_chart"] = float(
+                cos_chart_n[:n_pairs].mean().item()
+            )
+            out["eval/knn_cos_refined"] = float(
+                torch.nn.functional.cosine_similarity(
+                    refined[src_n[:n_pairs]], refined[dst_n[:n_pairs]], dim=-1
+                ).mean().item()
+            )
+
+        # --- relation prediction (PLAN.md 1.5) -----------------------------
+        # Four scorers, because "can the model name the relation" has more than
+        # one honest answer and the head alone used to be the only one:
+        #   rel_acc*_decoder    the MLP head (raw logits, then corrected for the
+        #                       train-set relation prior: the probe is relation
+        #                       uniform, the head is not trained that way)
+        #   rel_acc*_transport  transport fidelity cos(T_r x_a, x_b) calibrated
+        #                       against the score every relation gives on random
+        #                       pairs -- no head, no extra parameters
+        #   rel_acc*_ensemble   the two evidences added after row z-scoring
+        # The head is trained with tempered inverse-frequency class weights, so
+        # its uncorrected macro is expected to be close to the corrected one.
+        if self.model.use_decoder:
+            with torch.no_grad():
+                counts = self._relation_counts.to(device)
+                stats = self._transport_prior_stats(refined)
+                prior = self.fit_relation_prior_strength(refined, counts)
+                alpha = self.fit_relation_ensemble_weight(refined, stats)
+                out["eval/rel_prior_strength"] = float(prior)
+                out["eval/rel_ensemble_alpha"] = float(alpha)
+                evidence = {
+                    "decoder": self.model.relation_logits(
+                        x_a, x_b, mode="decoder"),
+                    "decoder_cal": self.model.relation_logits(
+                        x_a, x_b, mode="prior", train_counts=counts),
+                    "transport": self.model.relation_logits(
+                        x_a, x_b, mode="transport", score_stats=stats),
+                    "ensemble": self.model.relation_logits(
+                        x_a, x_b, mode="ensemble", score_stats=stats,
+                        train_counts=counts, ensemble_weight=alpha),
+                }
+                for name, ev in evidence.items():
+                    pred = ev.argmax(dim=-1)
+                    correct = (pred == rel).float()
+                    per_rel_sum = torch.zeros(
+                        self.num_rel, device=correct.device, dtype=correct.dtype
+                    )
+                    per_rel_n = torch.zeros_like(per_rel_sum)
+                    per_rel_sum.index_add_(0, rel, correct)
+                    per_rel_n.index_add_(0, rel, torch.ones_like(correct))
+                    seen = per_rel_n > 0
+                    out[f"eval/rel_acc_{name}"] = float(correct.mean().item())
+                    out[f"eval/rel_acc_macro_{name}"] = float(
+                        (per_rel_sum[seen] / per_rel_n[seen]).mean().item()
+                    )
+                # backwards-compatible names: the decoder, uncorrected
+                out["eval/rel_acc"] = out["eval/rel_acc_decoder"]
+                out["eval/rel_acc_macro"] = out["eval/rel_acc_macro_decoder"]
+
+        # evaluate() must not leave the model in eval mode (the caller resumes
+        # training right after; dropout off silently halves the regularisation)
         return out
+
+    @torch.no_grad()
+    def per_relation_report(
+        self, n_per_rel: int = 48
+    ) -> List[Dict[str, float]]:
+        """Filtered MRR per relation: model vs identity vs raw base.
+
+        The aggregate hides everything that matters on a 56-relation graph:
+        a single relation holding half the edges decides the micro average,
+        while the interesting learning happens on the small ones.
+        """
+        from relgat_projector.core.metrics.ranking import filtered_ranking
+
+        self.model.eval()
+        scored = self.eval_edges if self.eval_edges else self.edges
+        probe = stratified_edge_probe(
+            scored, max(self.cfg.probe_size, n_per_rel * self.num_rel),
+            seed=self.cfg.seed + 1, max_per_rel=n_per_rel,
+        )
+        if not probe:
+            return []
+        e = torch.tensor(probe, dtype=torch.long).to(self.cfg.device)
+        src, dst, rel = e[:, 0], e[:, 1], e[:, 2]
+        refined = self.model.refine()
+        others, never_valid = self._rank_mask(probe)
+        _, r_model = filtered_ranking(
+            self.model.apply(refined[src], rel), refined, dst,
+            other_targets=others, never_valid=never_valid,
+        )
+        _, r_id = filtered_ranking(
+            refined[src], refined, dst,
+            other_targets=others, never_valid=never_valid)
+        q_prod = self.model.production_query(self._node_emb_dev[src], rel)
+        _, r_prod = filtered_ranking(
+            q_prod, self._node_emb_dev, dst,
+            other_targets=others, never_valid=never_valid)
+        _, r_raw = filtered_ranking(
+            self._node_emb_dev[src], self._node_emb_dev, dst,
+            other_targets=others, never_valid=never_valid,
+        )
+
+        # relation naming per relation (the ensemble scorer): which relations
+        # can be *named* at all, alongside which can be retrieved
+        stats = self._transport_prior_stats(refined)
+        evidence = self.model.relation_logits(
+            refined[src], refined[dst], mode="ensemble", score_stats=stats,
+            train_counts=self._relation_counts.to(refined.device))
+        rel_pred = evidence.argmax(dim=-1)
+        dial = self.model.transport_strength(rel).detach().cpu().tolist()
+
+        idx2rel = {v: k for k, v in self.rel2idx.items()}
+        buckets: Dict[int, Dict[str, List[float]]] = {}
+        for i, (_, _, r) in enumerate(probe):
+            b = buckets.setdefault(int(r), {"mrr": [], "id": [], "prod": [],
+                                            "raw": [], "cls": [], "dial": []})
+            b["mrr"].append(float(1.0 / r_model[i]))
+            b["id"].append(float(1.0 / r_id[i]))
+            b["prod"].append(float(1.0 / r_prod[i]))
+            b["raw"].append(float(1.0 / r_raw[i]))
+            b["cls"].append(float(int(rel_pred[i]) == int(r)))
+            b["dial"].append(float(dial[i]))
+        rows = []
+        for r, b in buckets.items():
+            mean = lambda k: float(sum(b[k]) / len(b[k]))
+            rows.append({
+                "relation": idx2rel.get(r, str(r)),
+                "n": len(b["mrr"]),
+                "mrr_raw": mean("raw"),
+                "mrr_id": mean("id"),
+                "mrr_model": mean("mrr"),
+                "mrr_prod": mean("prod"),
+                "lift_over_raw": mean("mrr") - mean("raw"),
+                "op_lift": mean("mrr") - mean("id"),
+                "relation_acc": mean("cls"),
+                "transport_lambda": mean("dial"),
+            })
+        rows.sort(key=lambda row: -row["lift_over_raw"])
+        return rows
