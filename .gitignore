@@ -208,3 +208,7 @@ __marimo__/
 /.idea/*
 /wiazka-models/*
 
+
+# same-embedder control dataset: derived artefacts (re-generable with
+# python -m relgat_projector_apps.diagnostics.build_same_embedder_dataset)
+/data/same-embedder/
