@@ -9,6 +9,7 @@ cosine spread -- plus the honest (held-out) calibration split.
 
 import random
 
+import pytest
 import torch
 
 from relgat_projector.core.geometry.embedder import (
@@ -167,6 +168,24 @@ def test_uncentred_model_is_unchanged():
     assert not model.centered
     assert getattr(model.base_to_op, "bias", None) is None
     assert "base_to_op.bias" not in model.state_dict()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_centred_chart_builds_when_the_centre_lives_on_the_training_device():
+    """The trainer passes the centre computed on the device copy of the
+    embeddings while the module is still being built on the CPU; the
+    centering-bias math must not assume both operands share a device."""
+    mu = torch.randn(12).cuda()
+    model, x = _model(center_mean=mu.clone())
+    assert model.centered
+    assert torch.allclose(model.base_to_op.bias.cpu(),
+                          -(model.base_to_op.weight @ mu.cpu()), atol=1e-5)
+    model = model.to("cuda")
+    assert model.base_to_op.bias.device.type == "cuda"
+    assert torch.allclose(model.center_mean, mu, atol=1e-6)
+    with torch.no_grad():
+        chart = model.base_to_op(x.cuda())
+    assert chart.device.type == "cuda"
 
 
 def test_centred_checkpoint_round_trips(tmp_path):

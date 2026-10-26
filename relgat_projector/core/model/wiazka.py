@@ -261,9 +261,14 @@ class WiazkaModel(nn.Module):
         else:
             self.base_to_op = nn.Identity()
         if self.centered:
+            # the caller may pass the centre from the training device (the
+            # trainer computes it on the device copy of the embeddings) while
+            # the module is still being built on the CPU; the bias is the one
+            # place both operands must meet, so they meet there
             with torch.no_grad():
+                center = self.center_mean.to(self.base_to_op.weight.device)
                 self.base_to_op.bias.copy_(
-                    -self.base_to_op.weight @ self.center_mean
+                    -self.base_to_op.weight @ center
                 )
                 self.base_to_op.bias.requires_grad_(False)
         if proj_weight is not None:
