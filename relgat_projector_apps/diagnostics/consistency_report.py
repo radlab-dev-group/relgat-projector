@@ -38,6 +38,7 @@ import torch
 from relgat_projector.core.diagnostics import (
     AdditiveTransport,
     CheckpointTransport,
+    Transport,
     document_scores,
     order_description_separation,
     order_separation,
@@ -125,7 +126,7 @@ class Embedder:
 
 # ------------------------------------------------------------------------- 12a
 def run_documents(documents: List[Dict], embed: Embedder, lang: str,
-                  transport: AdditiveTransport) -> Dict:
+                  transport: Transport) -> Dict:
     rows: List[Dict] = []
     for doc in documents:
         texts = [claim[lang] for claim in doc["claims"]]
@@ -228,29 +229,66 @@ def run_order(tasks: List[Dict], embed: Embedder, langs: Sequence[str],
 
 
 # --------------------------------------------------------------------- reporting
+#: label of the learned-operator 12a block inside results["lang"][lang]
+LEARNED = "12a_learned"
+
+
+def _print_document_report(report: Dict, lang: str, title: str) -> None:
+    print(f"\n=== 12a {title} [{lang}] ===")
+    header = f"{'document':<22}{'label':<24}{'S':>7}{'K':>7}{'HD':>7}{'raw':>7}{'neg':>7}{'goldAUC':>9}"
+    print(header)
+    print("-" * len(header))
+    for row in report["documents"]:
+        print(f"{row['id']:<22}{row['label']:<24}"
+              f"{row['self_negation']:>7.3f}{row['coherence_k']:>7.3f}"
+              f"{row['holonomy']:>7.3f}{row['raw_incoherence']:>7.3f}"
+              f"{row['negation_baseline']:>7.3f}{row['gold_pair_auc']:>9.3f}")
+    coherent = report["mean_by_label"]["coherent"]
+    contra = report["mean_by_label"]["contradictory"]
+    print(f"{'MEAN coherent':<22}{'':<24}"
+          + "".join(f"{coherent[name]:>7.3f}" for name, _, _ in DOCUMENT_METRICS))
+    print(f"{'MEAN contradictory':<22}{'':<24}"
+          + "".join(f"{contra[name]:>7.3f}" for name, _, _ in DOCUMENT_METRICS))
+    print("AUC contradictory-vs-coherent: " + "  ".join(
+        f"{name}={report['auc'][name]:.3f}" for name, _, _ in DOCUMENT_METRICS))
+    print(f"gold contradiction pairs: mean AUC = {report['gold_pair_auc_mean']:.3f}")
+
+
+def _auc_row(report: Dict) -> Dict[str, float]:
+    row = dict(report["auc"])
+    row["goldPair"] = report["gold_pair_auc_mean"]
+    return row
+
+
+def _print_transport_comparison(lang: str, additive: Dict, learned: Dict) -> None:
+    """AUC table of the same 12a metrics under both transports, plus delta."""
+    columns = [name for name, _, _ in DOCUMENT_METRICS] + ["goldPair"]
+    base, model_auc = _auc_row(additive), _auc_row(learned)
+    print(f"\n=== 12a learned operator vs translation baseline [{lang}] ===")
+    header = f"{'variant':<26}" + "".join(f"{c:>10}" for c in columns)
+    print(header)
+    print("-" * len(header))
+    for label, values in (("translation baseline", base), ("learned operator", model_auc)):
+        print(f"{label:<26}" + "".join(
+            f"{values[c]:>10.3f}" if values[c] == values[c] else f"{'nan':>10}"
+            for c in columns))
+    delta = {c: model_auc[c] - base[c] for c in columns
+             if base[c] == base[c] and model_auc[c] == model_auc[c]}
+    print(f"{'learned - baseline':<26}" + "".join(
+        f"{delta[c]:>+10.3f}" if c in delta else f"{'-':>10}" for c in columns))
+    print("  (AUC 0.5 = no signal; >0.5 = the metric rises on self-contradicting text)")
+
+
 def print_report(results: Dict) -> None:
     for lang, block in results.get("lang", {}).items():
         report = block.get("12a")
-        if not report:
-            continue
-        print(f"\n=== 12a self-consistency [{lang}] ===")
-        header = f"{'document':<22}{'label':<24}{'S':>7}{'K':>7}{'HD':>7}{'raw':>7}{'neg':>7}{'goldAUC':>9}"
-        print(header)
-        print("-" * len(header))
-        for row in report["documents"]:
-            print(f"{row['id']:<22}{row['label']:<24}"
-                  f"{row['self_negation']:>7.3f}{row['coherence_k']:>7.3f}"
-                  f"{row['holonomy']:>7.3f}{row['raw_incoherence']:>7.3f}"
-                  f"{row['negation_baseline']:>7.3f}{row['gold_pair_auc']:>9.3f}")
-        coherent = report["mean_by_label"]["coherent"]
-        contra = report["mean_by_label"]["contradictory"]
-        print(f"{'MEAN coherent':<22}{'':<24}"
-              + "".join(f"{coherent[name]:>7.3f}" for name, _, _ in DOCUMENT_METRICS))
-        print(f"{'MEAN contradictory':<22}{'':<24}"
-              + "".join(f"{contra[name]:>7.3f}" for name, _, _ in DOCUMENT_METRICS))
-        print("AUC contradictory-vs-coherent: " + "  ".join(
-            f"{name}={report['auc'][name]:.3f}" for name, _, _ in DOCUMENT_METRICS))
-        print(f"gold contradiction pairs: mean AUC = {report['gold_pair_auc_mean']:.3f}")
+        learned = block.get(LEARNED)
+        if report:
+            _print_document_report(report, lang, "self-consistency [translation baseline]")
+        if learned:
+            _print_document_report(learned, lang, "self-consistency [learned operator]")
+        if report and learned:
+            _print_transport_comparison(lang, report, learned)
 
     block = results.get("12b") or {}
     for key, value in block.items():
@@ -339,12 +377,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         for lang in args.langs
     }
 
+    # 12a on the *learned* operator: only possible when the documents are
+    # embedded in the checkpoint's own base space (the same-embedder control
+    # run).  Comparing a learned T_ant against a baseline in another space
+    # would measure the spaces, not the method.
+    learned = None
+    if model is not None and "12a" in args.section:
+        if embed.dim == model.base_dim:
+            learned = CheckpointTransport(
+                model, rel2idx, device=str(next(model.parameters()).device))
+            print(f"[12a] measuring the learned operator too "
+                  f"(embedder dim {embed.dim} == checkpoint base dim)")
+        else:
+            print(f"[12a] learned operator skipped for documents: it lives in "
+                  f"{model.base_dim}-d, documents in {embed.dim}-d")
+
     results: Dict = {"lang": {}}
     for lang in args.langs:
-        results["lang"][lang] = {
-            "12a": run_documents(documents, embed, lang, transports[lang])
-            if "12a" in args.section else None,
-        }
+        entry: Dict = {"12a": None, "12a_learned": None}
+        if "12a" in args.section:
+            entry["12a"] = run_documents(documents, embed, lang, transports[lang])
+            if learned is not None:
+                entry["12a_learned"] = run_documents(documents, embed, lang, learned)
+        results["lang"][lang] = entry
     if "12b" in args.section:
         results["12b"] = run_order(tasks, embed, args.langs, transports, model,
                                    rel2idx, commutation, args.order_vectors,
