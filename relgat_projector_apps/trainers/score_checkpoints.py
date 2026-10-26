@@ -56,7 +56,16 @@ KEYS = [
     ("prod_tr", "eval/prod_mrr_traffic"),
     ("raw_tr", "eval/raw_mrr_traffic"),
     ("lift_tr", "eval/mrr_prod_lift_traffic"),
+    # dial-invariant: the best global lambda, i.e. what the checkpoint ships
+    # regardless of how well the per-relation dial happened to be fitted
+    ("prod_tr_bl", "eval/prod_mrr_traffic_bestlam"),
+    ("lam_tr", "eval/prod_lambda_traffic"),
+    ("score", None),
 ]
+
+
+def selection_row(metrics) -> float:
+    return WiazkaTrainer.selection_score(metrics)
 
 
 def build_trainer(
@@ -66,15 +75,24 @@ def build_trainer(
     edges: List[tuple],
     device: str,
     probe: int,
+    calib_ratio: float | None = None,
 ) -> WiazkaTrainer:
-    """Load a checkpoint into a trainer whose split matches the run's."""
+    """Load a checkpoint into a trainer whose split matches the run's.
+
+    ``calib_ratio`` overrides the run's own value, which is how an A/B of two
+    calibration sources is measured on one set of weights.
+    """
     model, _r, spec, meta = load_checkpoint(ckpt_dir, device=device)
     run_cfg = meta.get("config", {})
     cfg = WiazkaConfig(**{k: v for k, v in run_cfg.items()
                           if k in WiazkaConfig.__dataclass_fields__})
     cfg.device = device
-    # the run's split: the probe must be drawn from the same held-out edges
+    # the run's split: the probe must be drawn from the same held-out edges,
+    # and the calibration slice (if any) from the same part of them
     cfg.train_ratio = float(run_cfg.get("train_ratio", 0.9))
+    cfg.calib_ratio = float(run_cfg.get("calib_ratio", 0.0))
+    if calib_ratio is not None:
+        cfg.calib_ratio = float(calib_ratio)
     cfg.probe_size = probe
     trainer = WiazkaTrainer(node2emb, rel2idx, edges, cfg)
     # the F4 connection creates ``ctx_W``/``ctx_P``/``log_eps`` when it is
@@ -116,7 +134,9 @@ def resave_calibration(ckpt_dir: str, trainer: WiazkaTrainer) -> str:
 
 def pick_row(trainer: WiazkaTrainer, probe: int) -> Dict[str, float]:
     metrics = trainer.evaluate(n_probe=probe)
-    return {short: float(metrics[key]) for short, key in KEYS if key in metrics}
+    row = {short: float(metrics[key]) for short, key in KEYS if key}
+    row["score"] = WiazkaTrainer.selection_score(metrics)
+    return row
 
 
 def main() -> None:
@@ -131,6 +151,10 @@ def main() -> None:
     parser.add_argument("--only-calibration", action="store_true",
                         help="refit dial/prior/alpha on train edges and re-save "
                              "them into the checkpoint (metrics row omitted)")
+    parser.add_argument("--calib-ratio", type=float, default=None,
+                        help="override the run's calib_ratio (fraction of the "
+                             "held-out edges used to fit dial/prior/alpha; "
+                             "0 = train edges)")
     parser.add_argument("--qr-relations", default=DEFAULT_QR_RELATIONS,
                         help="comma-separated relations for QR-Recall")
     parser.add_argument("--qr-max-queries", type=int, default=256)
@@ -145,7 +169,8 @@ def main() -> None:
     for ckpt in args.checkpoints:
         tag = ckpt.rstrip("/").split("/")[-2] if ckpt.rstrip("/").endswith("best") \
             else ckpt.rstrip("/").split("/")[-1]
-        trainer = build_trainer(ckpt, node2emb, rel2idx, edges, args.device, args.probe)
+        trainer = build_trainer(ckpt, node2emb, rel2idx, edges, args.device,
+                                args.probe, calib_ratio=args.calib_ratio)
 
         entry: Dict[str, Any] = {}
         if args.only_calibration:

@@ -104,7 +104,14 @@ def save_checkpoint(
 #: State-dict entries a model may be missing when loading an older checkpoint.
 #: Each entry must be a parameter whose constructor default reproduces the
 #: behaviour the model had before the parameter existed.
-_TOLERATED_MISSING = frozenset({"transport_dial"})
+_TOLERATED_MISSING = frozenset({
+    "transport_dial",
+    # an uncentred chart has no affine bias and no centre buffer; a
+    # checkpoint written before the base-centring option existed simply
+    # keeps its (zero) documented initialisation for both
+    "base_to_op",
+    "center_mean",
+})
 
 
 def apply_calibrated_scalars(model, meta: Optional[Dict[str, Any]]) -> None:

@@ -197,6 +197,7 @@ class WiazkaModel(nn.Module):
         proj_weight: torch.Tensor | None = None,
         tie_projections: bool = True,
         freeze_projection: bool = False,
+        center_mean: torch.Tensor | None = None,
     ):
         super().__init__()
         self.register_buffer("node_emb_fixed", node_emb)
@@ -236,9 +237,35 @@ class WiazkaModel(nn.Module):
         # QR-Recall number measured before that stage exactly 0.0).
         base_dim = node_emb.size(1)
         self.tie_projections = bool(tie_projections) and base_dim != D
-        self.base_to_op = (
-            nn.Linear(base_dim, D, bias=False) if base_dim != D else nn.Identity()
+        #: origin of the operator chart.  ``base_to_op`` is affine when a
+        #: centre is supplied, so *every* call site -- refinement, shadow
+        #: manifold, production query, relation logits -- sees the centred
+        #: chart without knowing about it, and ``_export_linear`` adds the
+        #: centre back so the retriever space is exactly the stored vectors.
+        self.register_buffer(
+            "center_mean",
+            torch.zeros(base_dim) if center_mean is None
+            else center_mean.detach().to(dtype=torch.float32).clone(),
         )
+        self.centered = center_mean is not None
+        if base_dim != D:
+            self.base_to_op = nn.Linear(base_dim, D, bias=self.centered)
+        elif self.centered:
+            # same dimension, but the chart still needs an origin: an
+            # identity linear map with the centering bias
+            identity = nn.Linear(base_dim, D, bias=True)
+            with torch.no_grad():
+                identity.weight.copy_(torch.eye(D, dtype=identity.weight.dtype))
+                identity.bias.zero_()
+            self.base_to_op = identity
+        else:
+            self.base_to_op = nn.Identity()
+        if self.centered:
+            with torch.no_grad():
+                self.base_to_op.bias.copy_(
+                    -self.base_to_op.weight @ self.center_mean
+                )
+                self.base_to_op.bias.requires_grad_(False)
         if proj_weight is not None:
             if not isinstance(self.base_to_op, nn.Linear):
                 raise ValueError("proj_weight requires base_dim != op_dim")
@@ -335,6 +362,9 @@ class WiazkaModel(nn.Module):
             "attention": bool(attention),
             "tie_projections": bool(tie_projections),
             "frozen_projection": bool(self.frozen_projection),
+            # a centred chart needs a bias in base_to_op, so the shape of the
+            # module -- and therefore the state dict -- depends on it
+            "centered": bool(self.centered),
         }
         if use_applicability:
             self.applicability = ApplicabilityHead(D, num_rel)
@@ -388,7 +418,12 @@ class WiazkaModel(nn.Module):
             out = x @ self.base_to_op.weight
         else:
             out = self.to_retriever(x)
-        return out + torch.tanh(self.export_gate) * self.export_proj(x)
+        out = out + torch.tanh(self.export_gate) * self.export_proj(x)
+        if self.centered:
+            # the chart was built on x - mu, so its adjoint lands in the
+            # centred space; the vector database holds the stored vectors
+            out = out + self.center_mean
+        return out
 
     def to_retriever_space(self, x: torch.Tensor) -> torch.Tensor:
         """Export operator-space vectors into the base (retriever) space.
@@ -610,6 +645,10 @@ class WiazkaModel(nn.Module):
             use_decoder=bool(spec.get("use_decoder", True)),
             attention=bool(spec.get("attention", False)),
             tie_projections=bool(spec.get("tie_projections", False)),
+            center_mean=(
+                torch.zeros(int(spec["base_dim"]))
+                if bool(spec.get("centered", False)) else None
+            ),
         )
         # the projection is rebuilt from the state dict, so "frozen" has to be
         # re-applied after construction rather than passed through the ctor

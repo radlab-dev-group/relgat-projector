@@ -10,7 +10,10 @@ import random
 
 import torch
 
-from relgat_projector.core.metrics.ranking import stratified_edge_probe
+from relgat_projector.core.metrics.ranking import (
+    edge_probe,
+    stratified_edge_probe,
+)
 from relgat_projector.core.model.wiazka import WiazkaModel
 from relgat_projector.core.operator import build_operator
 from relgat_projector.trainer.stages import StageManager
@@ -1083,3 +1086,32 @@ def test_load_checkpoint_restores_the_fitted_scalars(tmp_path):
     model, *_ = load_checkpoint(ckpt, device="cpu")
     assert model.relation_prior_strength == 0.0        # balanced head: no prior
     assert model.relation_ensemble_weight == 1.0       # neutral, as before
+
+
+def test_edge_probe_unique_by_caps_high_target_sources():
+    """The ranking protocol scores one query per (source, relation).
+
+    A uniform draw lets a source with 40 true targets contribute 40 rows,
+    so the metric then describes the target multiplicity of the graph, not
+    the model.  ``unique_by="src_rel"`` makes the probe measure the model.
+    """
+    edges = [(0, d, 0) for d in range(40)] + [(i, (i + 1) % 60, 1) for i in range(1, 60)]
+    capped = edge_probe(edges, 40, seed=1, unique_by="src_rel")
+    # the capped probe has at most one row per (src, rel) and fills its budget
+    ckeys = [(s, r) for s, _d, r in capped]
+    assert len(ckeys) == len(set(ckeys)) == 40
+    # and the cap is what makes it so: the same draw without it duplicates
+    # the high-target source (40 of 100 rows are (0, 0))
+    raw_all = edge_probe(edges, 40, seed=1)
+    rkeys = [(s, r) for s, _d, r in raw_all]
+    assert len(set(rkeys)) < len(rkeys)
+
+
+def test_selection_prefers_a_better_traffic_model():
+    """The checkpoint criterion must track the shipped production quality."""
+    base = {"eval/mrr": 0.2, "eval/mrr_macro": 0.2, "eval/prod_mrr": 0.2,
+            "eval/rel_acc_macro_ensemble": 0.4}
+    weak_traffic = dict(base, **{"eval/prod_mrr_traffic_bestlam": 0.30})
+    strong_traffic = dict(base, **{"eval/prod_mrr_traffic_bestlam": 0.55})
+    assert (WiazkaTrainer.selection_score(strong_traffic)
+            > WiazkaTrainer.selection_score(weak_traffic))

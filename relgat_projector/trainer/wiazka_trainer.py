@@ -41,11 +41,56 @@ from relgat_projector.core.metrics.ranking import (
     filtered_ranking,
     stratified_edge_probe,
 )
+from relgat_projector.core.geometry.embedder import (
+    EmbedderProfile,
+    auto_op_dim,
+)
+
+#: random-pair cosine std of the space the shipped cosine knobs were tuned
+#: on (a sentence-embedder scale); ``geometry_auto`` rescales them by the
+#: ratio, so the defaults are reproduced exactly on that space and the
+#: *ratio* is what travels to any other embedder.
+REFERENCE_COS_STD = 0.047
 
 
 @dataclass
 class WiazkaConfig:
-    op_dim: int = 256
+    #: operator dimension.  ``0`` = derive it from the base-embedding
+    #: profile (:meth:`EmbedderProfile.op_dim_for_variance`), i.e. the
+    #: smallest dimension that keeps ``op_dim_variance`` of the variance.
+    #: A hand-picked 256 is a statement about *one* embedder: it raises
+    #: ``ValueError`` on any space with at most 256 dimensions, and on a
+    #: 1152-d space with effective rank ~60 it spends 4x the capacity the
+    #: data uses.  ``0`` makes the method work on any dimension.
+    op_dim: int = 0
+    #: variance target of the automatic ``op_dim`` (see above)
+    op_dim_variance: float = 0.95
+    #: cap on the automatic ``op_dim``; ``0`` = no cap (the space dimension)
+    op_dim_cap: int = 0
+    #: subtract the column mean from the base embeddings before the PCA
+    #: chart.  Anisotropy (a positive mean cosine of a random pair, e.g.
+    #: +0.13 for the Słowosieć embedder) is a shared direction that every
+    #: cosine is shifted by; centring removes it from the *chart* only --
+    #: the export and the raw baseline still use the stored vectors, so
+    #: the retriever space is untouched.  Measured: anisotropy
+    #: +0.1323 -> +0.0017, identity-transport MRR +0.004.
+    base_center: bool = False
+    #: fraction of the *held-out* edges used to fit the served scalars
+    #: (rewriting dial, relation prior, ensemble weight) instead of the
+    #: supervised ones.  Fitting them on train edges is fitting them on the
+    #: edges the decoder memorised: measured on F2 the whole ``alpha`` grid
+    #: scored macro 0.969-0.973 -- a flat curve, so the argmax is sampling
+    #: noise (shipped ``alpha`` 1.5 against a held-out optimum of 0.75).  The
+    #: slice is carved out of ``eval_edges`` before anything reports on it, so
+    #: the probe the metrics come from stays disjoint from the fit.
+    #: ``0.0`` keeps the historical (train-edge) behaviour.
+    calib_ratio: float = 0.0
+    #: scale the cosine-scale knobs off the measured random-pair cosine
+    #: standard deviation of *this* space instead of assuming the SimCLR
+    #: scale (0.07 temperature ~ 1.5x a 0.047 std).  The reference space is
+    #: the one the knobs act on: centred when ``base_center`` is on,
+    #: as-stored otherwise.
+    geometry_auto: bool = False
     num_generators: int = 16
     operator_type: str = "givens"
     gat_num_layers: int = 2
@@ -177,6 +222,12 @@ class WiazkaConfig:
 #: candidate weights of the transport evidence in the relation ensemble,
 #: ``z(head) + w * z(transport)``
 ENSEMBLE_WEIGHT_GRID = (0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
+
+#: global rewriting strengths scanned by ``eval/prod_mrr_*_bestlam``.
+#: ``0.0`` is "never rewrite" (i.e. the raw baseline), so the maximum over
+#: this grid is a lower bound on what the *per-relation* dial can reach --
+#: the dial can always imitate a global constant.
+LAMBDA_PROBE_GRID = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 
 def spread_sample(rows: Sequence, n: int, seed: int = 0) -> List:
@@ -339,6 +390,55 @@ class WiazkaTrainer:
         # evaluate() re-uploaded 1.1 GB on every evaluation)
         self._node_emb_dev = self.node_emb.to(self.cfg.device)
 
+        # ---------------------------------------------------- base geometry
+        # Everything the method assumes about the base space is measured
+        # here once, so no constant below has to be a guess about an
+        # embedder nobody looked at (see EmbedderProfile).
+        self.base_profile = EmbedderProfile.from_embeddings(
+            self._node_emb_dev, seed=self.cfg.seed
+        )
+        self.cfg.op_dim = self._resolve_op_dim(self.base_profile, self.cfg)
+        self.geometry = self._resolve_geometry(self.base_profile, self.cfg)
+        print(
+            f"[geometry] base space: dim={self.base_profile.dim} "
+            f"vectors={self.base_profile.num_vectors} "
+            f"norm={self.base_profile.norm_mean:.4f}+-{self.base_profile.norm_std:.4f}"
+            f"{' (unit-norm)' if self.base_profile.unit_norm else ' (NOT unit-norm)'}\n"
+            f"[geometry] random-pair cos "
+            f"{self.base_profile.pair_cos_mean:+.4f}+-{self.base_profile.pair_cos_std:.4f} "
+            f"(centred {self.base_profile.pair_cos_mean_centred:+.4f}"
+            f"+-{self.base_profile.pair_cos_std_centred:.4f}), "
+            f"anisotropy={self.base_profile.anisotropy:.4f}, "
+            f"effective rank={self.base_profile.effective_rank:.1f}\n"
+            f"[geometry] duplicates (1-NN cos>0.999): "
+            f"{self.base_profile.dup_1nn_fraction:.4f} "
+            f"(mean 1-NN cos {self.base_profile.dup_1nn_cos:.4f}) -- "
+            f"the raw baseline is inflated by this much\n"
+            f"[geometry] op_dim={self.cfg.op_dim} "
+            f"(EV "
+            + ", ".join(f"{k}:{v:.4f}" for k, v in
+                        sorted(self.base_profile.explained_variance.items(), key=lambda kv: int(kv[0])))
+            + f"), base_center={self.cfg.base_center}, "
+            f"cosine knobs T={self.geometry['contrast_temperature']:.4f} "
+            f"anchor_margin={self.geometry['anchor_margin']:.4f} "
+            f"knn_slack={self.geometry['knn_slack']:.4f}"
+        )
+
+        # the chart origin: a mean-centred base.  ``base_to_op`` becomes affine
+        # and the export adds the centre back, so the retriever index stays
+        # exactly the stored vectors.
+        center = None
+        if self.cfg.base_center:
+            center = self._node_emb_dev.mean(dim=0).detach()
+            print(
+                f"[geometry] chart centred on ||mu||={float(center.norm()):.4f} "
+                f"({float(center.norm()) / max(1e-9, self.base_profile.norm_mean):.1%} "
+                f"of a typical vector); anisotropy "
+                f"{self.base_profile.anisotropy:.4f} -> "
+                f"{abs(self.base_profile.pair_cos_mean_centred):.4f}"
+            )
+        self._base_center = center
+
         # compact edges
         self.edges: List[Tuple[int, int, int]] = [
             (self.id2idx[s], self.id2idx[d], self.rel2idx[r])
@@ -357,6 +457,25 @@ class WiazkaTrainer:
             print(
                 f"[split] train edges={len(self.edges)} "
                 f"held-out edges={len(self.eval_edges)}"
+            )
+        # ``calib_ratio`` splits the held-out set in two: a slice the served
+        # scalars are fitted on and a remainder the metrics are reported on.
+        # It has to happen here, before ``_targets_by_src_rel`` and the probe
+        # pools exist, so that a calibration edge can never be scored.
+        self.calib_edges: List[Tuple[int, int, int]] = []
+        calib = float(self.cfg.calib_ratio)
+        if calib > 0.0:
+            if not 0.0 < calib < 1.0:
+                raise ValueError(f"calib_ratio must be in (0, 1), got {calib}")
+            if not self.eval_edges:
+                raise ValueError(
+                    "calib_ratio > 0 needs a held-out split: set train_ratio < 1"
+                )
+            self.calib_edges, self.eval_edges = self._split_edges(
+                calib, source=self.eval_edges, seed=self.cfg.seed + 101)
+            print(
+                f"[split] calibration edges={len(self.calib_edges)} "
+                f"(fitted scalars) / scored held-out edges={len(self.eval_edges)}"
             )
         self.topology_endpoint_coverage = self._coverage_report()
 
@@ -420,7 +539,7 @@ class WiazkaTrainer:
         # a principal subspace only exists below the base dimensionality; an
         # operator wider than the embeddings keeps its random projection
         proj_weight = None
-        if self.cfg.proj_pca and self.cfg.op_dim < self.node_emb.size(1):
+        if self.cfg.proj_pca and self.cfg.op_dim < min(self.node_emb.shape):
             proj_weight = principal_projection(
                 self.node_emb, self.cfg.op_dim, device=self.cfg.device,
                 seed=self.cfg.seed,
@@ -439,6 +558,7 @@ class WiazkaTrainer:
             attention=self.cfg.gat_attention,
             proj_weight=proj_weight,
             tie_projections=True,
+            center_mean=center,
             # an orthonormal chart cannot survive AdamW: the weights are ~1/sqrt(D)
             # in magnitude while an Adam step is ~lr, so after a few hundred steps
             # W W^T was 0.22 away from the identity and every exported query was
@@ -486,10 +606,12 @@ class WiazkaTrainer:
         self.curvature_loss = CurvatureLoss(
             self.num_rel, margin_auto=True
         ).to(self.cfg.device)
-        self.contrast_loss = ContrastLoss(cfg.contrast_temperature)
+        # the resolved geometry, not the raw config: with ``geometry_auto`` the
+        # numbers below are the configured ones scaled to this base space
+        self.contrast_loss = ContrastLoss(self.geometry["contrast_temperature"])
         self.stability_loss = StabilityLoss(
             anchor_weight=self.cfg.anchor_weight,
-            anchor_margin=self.cfg.anchor_margin,
+            anchor_margin=self.geometry["anchor_margin"],
         )
         self.shadow_loss = ShadowLoss()
         self.decoder_loss = DecoderLoss(
@@ -660,20 +782,27 @@ class WiazkaTrainer:
         if fresh:
             self.optimizer.add_param_group({"params": fresh})
 
-    def _split_edges(self, ratio: float):
-        """Deterministic, triplet-disjoint train/holdout split of the edges.
+    def _split_edges(
+        self,
+        ratio: float,
+        source: Optional[List[Tuple[int, int, int]]] = None,
+        seed: Optional[int] = None,
+    ):
+        """Deterministic, position-disjoint split of an edge list.
 
-        Splits on *positions* of the edge list, so when the graph contains
-        duplicate ``(src, dst, rel)`` triplets (multi-graph semantics) no
-        position is used for training and held out at the same time.
+        Splits on *positions*, so when the graph contains duplicate
+        ``(src, dst, rel)`` triplets (multi-graph semantics) no position is
+        used for training and held out at the same time.  ``source`` defaults
+        to the training edges, which is what the historical caller wants.
         """
-        order = list(range(len(self.edges)))
-        random.Random(self.cfg.seed).shuffle(order)
+        rows = self.edges if source is None else source
+        seed = self.cfg.seed if seed is None else seed
+        order = list(range(len(rows)))
+        random.Random(seed).shuffle(order)
         n_train = max(1, int(round(ratio * len(order))))
-        train_ids, eval_ids = set(order[:n_train]), set(order[n_train:])
-        train, eval_ = [], []
-        for i in range(len(self.edges)):
-            (train if i in train_ids else eval_).append(self.edges[i])
+        train_ids = set(order[:n_train])
+        train = [rows[i] for i in range(len(rows)) if i in train_ids]
+        eval_ = [rows[i] for i in range(len(rows)) if i not in train_ids]
         return train, eval_
 
     def _coverage_report(self) -> float:
@@ -688,6 +817,66 @@ class WiazkaTrainer:
         coverage = visible / max(1, len(self.eval_edges))
         print(f"[split] held-out edges reachable in topology: {coverage:.1%}")
         return coverage
+
+    @staticmethod
+    def _resolve_op_dim(profile: EmbedderProfile, cfg: "WiazkaConfig") -> int:
+        """Resolve the operator dimension from the configured value.
+
+        ``op_dim == 0`` means "derive it from the space"; a positive value is
+        kept as configured.  The check that used to live in ``__init__``
+        raised when the operator was wider than the base embeddings, i.e. the
+        method *could not run at all* on an embedder with at most 256
+        dimensions.  Deriving the dimension from the measured spectrum makes
+        that case ordinary: the operator is then the smallest principal
+        subspace that keeps ``op_dim_variance`` of the variance.
+        """
+        configured = int(cfg.op_dim)
+        if configured > 0:
+            return configured
+        cap = int(cfg.op_dim_cap) or profile.dim
+        return auto_op_dim(profile, target=float(cfg.op_dim_variance), cap=cap)
+
+    @staticmethod
+    def _resolve_geometry(profile: EmbedderProfile, cfg: "WiazkaConfig") -> dict:
+        """Cosine knobs expressed in the units of *this* base space.
+
+        ``anchor_margin``, ``knn_slack`` and ``contrast_temperature`` are all
+        statements about a cosine difference.  In a space whose random pairs
+        already sit at cos 0.13 +- 0.05, a slack of 0.02 is 0.4 of a standard
+        deviation; in an isotropic space with the same 0.02 it is a different
+        constraint.  ``geometry_auto`` rescales every one of them by
+        ``std(this space) / std(reference space)`` so the shipped defaults are
+        reproduced on the reference space and travel as a *ratio* elsewhere.
+        The reference is the centred space when the chart is centred, because
+        that is the space the knobs then constrain.
+        """
+        if not cfg.geometry_auto:
+            return {
+                "contrast_temperature": float(cfg.contrast_temperature),
+                "anchor_margin": float(cfg.anchor_margin),
+                "knn_slack": float(cfg.knn_slack),
+                "cos_std_reference": None,
+                "cos_std_used": None,
+            }
+        used = (profile.pair_cos_std_centred if cfg.base_center
+                else profile.pair_cos_std)
+        scale = float(used) / REFERENCE_COS_STD
+        return {
+            "contrast_temperature": 0.07 * scale,
+            "anchor_margin": 0.05 * scale,
+            "knn_slack": 0.02 * scale,
+            "cos_std_reference": REFERENCE_COS_STD,
+            "cos_std_used": float(used),
+        }
+
+    def _calibration_edges(self) -> List[Tuple[int, int, int]]:
+        """Edges the served scalars are fitted on -- never the scored ones.
+
+        With ``calib_ratio`` set this is the held-out calibration slice (the
+        decoder was never shown it, so the fit is not a memorisation curve).
+        Without it the historical behaviour is kept: train edges.
+        """
+        return self.calib_edges if self.calib_edges else self.edges
 
     def _sample_edges(self, batch_size: int):
         if self.cfg.balance_relations:
@@ -869,7 +1058,7 @@ class WiazkaTrainer:
         cos_refined = torch.nn.functional.cosine_similarity(
             refined[src[sel]], refined[dst[sel]], dim=-1
         )
-        gap = (cos_base[sel] - self.cfg.knn_slack - cos_refined).clamp_min(0.0)
+        gap = (cos_base[sel] - self.geometry["knn_slack"] - cos_refined).clamp_min(0.0)
         return self.cfg.knn_weight * gap.mean()
 
     def _pce_pools_build(self, size: int = 64, max_k: int = 3):
@@ -1203,6 +1392,9 @@ class WiazkaTrainer:
                 "eval/prod_mrr", "eval/mrr_prod_lift", "eval/hits@1",
                 "eval/anchor", "eval/knn_cos_refined",
                 "eval/rel_acc_macro", "eval/rel_acc_macro_ensemble",
+                "eval/prod_mrr_traffic", "eval/prod_mrr_traffic_bestlam",
+                "eval/prod_mrr_traffic_calib",
+                "eval/prod_lambda_traffic", "eval/raw_mrr_traffic",
                 "eval/path_lift", "eval/eps",
                 "eval/pce_k1", "eval/pce_k2", "eval/pce_ratio_k2",
             ]
@@ -1257,13 +1449,32 @@ class WiazkaTrainer:
           relation while the graph metrics looked fine);
         * ``eval/rel_acc_macro`` -- macro top-1 accuracy of the relation
           decoder: can the model *name* the relation between two nodes, on
-          every relation and not only on the dominant one.
+          every relation and not only on the dominant one;
+        * the production term, in order of preference:
+          ``eval/prod_mrr_traffic_calib`` -- the traffic MRR with the
+          per-relation dial fitted on the calibration slice, i.e. the quantity
+          the shipped artifact is calibrated to;
+          ``eval/prod_mrr_traffic_bestlam`` -- the same probe with the best
+          *global* rewriting strength (the historical fallback when no
+          calibration slice exists).  Neither depends on the gradient-trained
+          dial, which never leaves ``lam ~ 0.8``: measured on F2 the criterion
+          that ranked on that dial chose weights whose traffic metric had
+          already decayed (0.4696 at epoch 15 -> 0.4467 at epoch 60) as the
+          best of the run.  The per-relation dial is what separates the two:
+          on F2 no global lambda beat the raw query, while the calibrated
+          dial scored 0.4902 against 0.4499.
         """
+        traffic = metrics.get("eval/prod_mrr_traffic_calib")
+        if traffic is None or traffic != traffic:
+            traffic = metrics.get("eval/prod_mrr_traffic_bestlam")
+        if traffic is None or traffic != traffic:
+            traffic = metrics.get("eval/prod_mrr", 0.0)
         return (
-            0.42 * metrics.get("eval/mrr", 0.0)
-            + 0.25 * metrics.get("eval/mrr_macro", 0.0)
-            + 0.18 * metrics.get("eval/prod_mrr", 0.0)
-            + 0.15 * metrics.get("eval/rel_acc_macro_ensemble",
+            0.30 * metrics.get("eval/mrr", 0.0)
+            + 0.18 * metrics.get("eval/mrr_macro", 0.0)
+            + 0.10 * metrics.get("eval/prod_mrr", 0.0)
+            + 0.24 * traffic
+            + 0.18 * metrics.get("eval/rel_acc_macro_ensemble",
                                  metrics.get("eval/rel_acc_macro", 0.0))
         )
 
@@ -1334,6 +1545,12 @@ class WiazkaTrainer:
                     getattr(self.model, "relation_ensemble_weight", 1.0)),
                 "relation_prior_strength": float(
                     getattr(self.model, "relation_prior_strength", 1.0)),
+                # what the base space actually measured like, so a
+                # checkpoint says which embedder scale its cosine knobs were
+                # resolved against (``op_dim`` above is the *resolved* one)
+                "base_profile": self.base_profile.as_dict(),
+                "geometry": self.geometry,
+                "num_calibration_edges": len(self.calib_edges),
             },
             commutation=self.curvature_loss.commutation().cpu(),
             metrics=metrics if metrics is not None else last,
@@ -1428,6 +1645,10 @@ class WiazkaTrainer:
         transport counterpart of the class prior; measured on the Słowosieć it
         is worth +0.04 macro relation accuracy, and without it the transport
         scorer is worse than the trained head.
+
+        Fitted on the **calibration** edges (see :meth:`_calibration_edges`):
+        on the supervised edges the head has memorised the labels, so the
+        grid curve is flat and its argmax is sampling noise.
         """
         gen = torch.Generator().manual_seed(self.cfg.seed + 21)
         idx_a = torch.randint(
@@ -1458,12 +1679,14 @@ class WiazkaTrainer:
         against 0.465 uncorrected once the decoder was balanced.  One scalar on
         **train** edges covers both regimes (``0`` = trust the balanced head).
         """
-        if not self.edges:
+        source = self._calibration_edges()
+        if not source:
             return float(self.model.relation_prior_strength)
         gen = torch.Generator().manual_seed(self.cfg.seed + 31)
-        n = min(int(n_pairs), len(self.edges))
-        pick = torch.randperm(len(self.edges), generator=gen)[:n]
-        edges = self.edge_tensor[pick].to(refined.device)
+        table = torch.tensor(source, dtype=torch.long)
+        n = min(int(n_pairs), len(source))
+        pick = torch.randperm(len(source), generator=gen)[:n]
+        edges = table[pick].to(refined.device)
         src, dst, rel = edges[:, 0], edges[:, 1], edges[:, 2]
         logits = self.model.relation_logits(refined[src], refined[dst],
                                             mode="decoder")
@@ -1494,16 +1717,21 @@ class WiazkaTrainer:
         against 0.285 for the head) and an equal-weight ensemble beat both;
         class-balancing the head reversed the order (0.49 against 0.42), so the
         fixed equal weighting shipped a relation classifier *worse* than the head
-        it blended.  One scalar fitted on **train** edges settles it the same way
-        :meth:`calibrate_transport_dial` settles the dial -- the held-out probe
-        stays untouched.
+        it blended.  One scalar fitted on the **calibration** edges (see
+        :meth:`_calibration_edges`) settles it the same way
+        :meth:`calibrate_transport_dial` settles the dial -- the held-out
+        probe stays untouched.  On the supervised edges the head has
+        memorised the labels, so the grid curve is flat and its argmax is
+        sampling noise.
         """
-        if not self.edges:
+        source = self._calibration_edges()
+        if not source:
             return float(self.model.relation_ensemble_weight)
         gen = torch.Generator().manual_seed(self.cfg.seed + 33)
-        n = min(int(n_pairs), len(self.edges))
-        pick = torch.randperm(len(self.edges), generator=gen)[:n]
-        edges = self.edge_tensor[pick].to(refined.device)
+        table = torch.tensor(source, dtype=torch.long)
+        n = min(int(n_pairs), len(source))
+        pick = torch.randperm(len(source), generator=gen)[:n]
+        edges = table[pick].to(refined.device)
         src, dst, rel = edges[:, 0], edges[:, 1], edges[:, 2]
         # the head evidence exactly as the ensemble sees it, i.e. with the prior
         # correction of :meth:`fit_relation_prior_strength` already applied
@@ -1524,6 +1752,7 @@ class WiazkaTrainer:
         grid: Optional[Sequence[float]] = None,
         edges: Optional[List[Tuple[int, int, int]]] = None,
         smooth: int = 3,
+        min_calib_per_rel: int = 24,
     ) -> Dict[int, float]:
         """Fit the per-relation rewriting strength on training edges.
 
@@ -1536,16 +1765,38 @@ class WiazkaTrainer:
         that ranks the gold node best in the base index, which is the quantity
         the product reports.
 
-        It is fitted on **train** edges (up to ``n_per_rel`` per relation) and
-        is one parameter per relation, so it does not touch the held-out set the
-        reported numbers come from.  Returns ``{relation_id: lam}``.
+        It is fitted on the **calibration** edges (up to ``n_per_rel`` per
+        relation) and is one parameter per relation, so it does not touch the
+        probe the reported numbers come from.  The fit is on edges the decoder
+        and the pull loss have never seen, so the curve is not a memorisation
+        curve (measured on F2: fitting on train edges ships ``lam`` 0.28 on
+        ``synonimia`` where the held-out data says ~0.05).  Returns
+        ``{relation_id: lam}``.
         """
         if grid is None:
             grid = [round(0.1 * i, 1) for i in range(11)]
-        source = self.edges if edges is None else edges
+        source = self._calibration_edges() if edges is None else edges
         grouped: Dict[int, List[Tuple[int, int]]] = {}
         for s_, d_, r_ in source:
             grouped.setdefault(int(r_), []).append((int(s_), int(d_)))
+        # A relation the calibration slice barely covers cannot have its dial
+        # fitted there: one edge fixes the grid argmax by accident, and the
+        # dial is the one parameter that decides whether the relation gets
+        # rewritten at all.  Those relations fall back to the supervised edges
+        # -- an honest fit needs data, and a biased fit on 400 edges still
+        # beats a random one on 2.
+        fallback: Dict[int, List[Tuple[int, int]]] = {}
+        if source is not self.edges:
+            for s_, d_, r_ in self.edges:
+                fallback.setdefault(int(r_), []).append((int(s_), int(d_)))
+        topped_up = 0
+        for r, rows in list(grouped.items()):
+            if len(rows) < max(2, int(min_calib_per_rel)) and fallback.get(r):
+                grouped[r] = rows + fallback[r]
+                topped_up += 1
+        if topped_up:
+            print(f"[dial] {topped_up} relations below {int(min_calib_per_rel)} "
+                  f"calibration edges: fitted on supervised edges")
         # spread over each relation instead of taking its first edges (see
         # ``spread_sample``): the dial is one scalar per relation fitted from
         # ~100 examples, so which 100 decides what it describes
@@ -1589,6 +1840,118 @@ class WiazkaTrainer:
             if r not in chosen:
                 dial[r] = original[r]
         return chosen
+
+    @torch.no_grad()
+    def _best_lambda_mrr(
+        self,
+        x: torch.Tensor,
+        exported: torch.Tensor,
+        rel: torch.Tensor,
+        dst: torch.Tensor,
+        others,
+        never_valid,
+        grid: Sequence[float] = LAMBDA_PROBE_GRID,
+    ) -> Tuple[float, float]:
+        """``(best mrr, argmax lam)`` over a *global* rewriting strength.
+
+        Why this exists: the checkpoint a run ships is chosen by a score
+        computed at every epoch, and until now that score contained the
+        production metric measured with the **gradient-trained dial** -- a
+        dial that measurably never moves from ``lam ~ 0.8``.  Measured on F2
+        the traffic metric rose to 0.4696 around epoch 15 and then decayed to
+        0.4467 while the loss kept improving, so the epoch-wise score ranked
+        weights by a quantity the product never serves, and the "best"
+        checkpoint was the best-looking-at-lam-0.8 one.  Scanning a global
+        ``lam`` costs one extra ranking per grid point, is independent of the
+        dial, and bounds the calibrated model from below.
+        """
+        best_mrr, best_lam = -1.0, 0.0
+        for lam in grid:
+            query = x if float(lam) == 0.0 else (1.0 - float(lam)) * x + float(lam) * exported
+            stats, _ = filtered_ranking(
+                query, self._node_emb_dev, dst,
+                other_targets=others, never_valid=never_valid)
+            if stats["mrr"] > best_mrr:
+                best_mrr, best_lam = float(stats["mrr"]), float(lam)
+        return best_mrr, best_lam
+
+    @torch.no_grad()
+    def _calibrated_traffic_mrr(
+        self,
+        x: torch.Tensor,
+        exported: torch.Tensor,
+        rel: torch.Tensor,
+        dst: torch.Tensor,
+        others,
+        never_valid,
+        n_per_rel: int = 64,
+        grid: Sequence[float] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    ) -> float:
+        """Traffic MRR with a per-relation dial fitted on the calibration slice.
+
+        ``prod_mrr_traffic`` measured with the gradient-trained dial is not the
+        quantity the product ships: the dial is calibrated before serving and
+        the calibration travels in the checkpoint.  A *global* lambda scan
+        (:meth:`_best_lambda_mrr`) cannot substitute for it -- on F2 no global
+        lambda beat the raw query on traffic, while the per-relation dial scored
+        0.4902 against 0.4499 raw, because the useful answer is "rewrite
+        ``antonimia`` fully and ``synonimia`` not at all" and no constant can
+        express that.  So the epoch-wise checkpoint score has to be measured
+        with a dial fitted the same way the served one is.
+
+        The fit goes into a local buffer, never into ``model.transport_dial``:
+        this is a measurement, and a measurement that mutates the weights it is
+        about to score is how a training run starts optimising its own probe.
+        Calibration edges only; the probe it scores is the disjoint remainder
+        of the held-out set.
+        """
+        if not self.calib_edges:
+            return float("nan")
+        base = self._node_emb_dev
+        source = self._calibration_edges()
+        grouped: Dict[int, List[Tuple[int, int]]] = {}
+        for s_, d_, r_ in source:
+            grouped.setdefault(int(r_), []).append((int(s_), int(d_)))
+        fallback: Dict[int, List[Tuple[int, int]]] = {}
+        if source is not self.edges:
+            for s_, d_, r_ in self.edges:
+                fallback.setdefault(int(r_), []).append((int(s_), int(d_)))
+        for r, rows in list(grouped.items()):
+            if len(rows) < 24 and fallback.get(r):
+                grouped[r] = rows + fallback[r]
+
+        dial = torch.zeros(self.num_rel, device=base.device)
+        for r, rows in sorted(grouped.items()):
+            rows = spread_sample(rows, n_per_rel, seed=self.cfg.seed + r)
+            src = torch.tensor([p[0] for p in rows], device=base.device)
+            dstc = torch.tensor([p[1] for p in rows], device=base.device)
+            relc = torch.full((len(rows),), r, dtype=torch.long, device=base.device)
+            others_c = [
+                [c for c in self._targets_by_src_rel.get((int(s_), r), ())
+                 if c != int(d_)]
+                for s_, d_ in rows
+            ]
+            never_c = [[int(s_)] for s_, _d in rows]
+            x_row = base[src]
+            exp_row = self.model._export_linear(
+                self.model.apply(self.model.base_to_op(x_row), relc))
+            best_mrr = -1.0
+            for lam in grid:
+                query = x_row if float(lam) == 0.0 else (
+                    (1.0 - float(lam)) * x_row + float(lam) * exp_row
+                )
+                stats, _ = filtered_ranking(
+                    query, base, dstc, other_targets=others_c,
+                    never_valid=never_c)
+                if stats["mrr"] > best_mrr:
+                    best_mrr = float(stats["mrr"])
+                    dial[r] = float(lam)
+        lam = dial[rel].unsqueeze(-1)
+        query = (1.0 - lam) * x + lam * exported
+        stats, _ = filtered_ranking(
+            query, self._node_emb_dev, dst,
+            other_targets=others, never_valid=never_valid)
+        return float(stats["mrr"])
 
     @torch.no_grad()
     def evaluate(self, n_probe: Optional[int] = None) -> Dict[str, float]:
@@ -1671,9 +2034,20 @@ class WiazkaTrainer:
         # the vote.  A dial that over-wrote ``synonimia`` cost 0.20 MRR there and
         # 0.004 in the stratified number -- which is exactly how the defect
         # stayed invisible.  Both views are reported; neither is enough alone.
+        #
+        # The probe is stratified by (src, rel), NOT by (src, dst, rel): the
+        # ranking protocol compares one query against a *set* of answers, so a
+        # node with 40 true targets of one relation contributes one query, not
+        # 40.  Stratifying on the triplet duplicated exactly those high-target
+        # nodes and handed the metric to the relation whose targets are most
+        # duplicated: on F3 the traffic probe then scored 0.4445 best-lambda
+        # while the identical model scored 0.4902 on a triplet-stratified probe
+        # of the same size, with the raw baseline moving 0.4426 -> 0.4499 in the
+        # same probe change.  The metric was measuring the probe, not the model.
         traffic_source = self.eval_edges if self.eval_edges else self.edges
-        traffic = edge_probe(traffic_source, self.cfg.probe_size,
-                             seed=self.cfg.seed + 7)
+        traffic = edge_probe(
+            traffic_source, self.cfg.probe_size,
+            seed=self.cfg.seed + 7, unique_by="src_rel")
         if len(traffic) > 1:
             et = torch.tensor(traffic, dtype=torch.long).to(device)
             t_src, t_dst, t_rel = et[:, 0], et[:, 1], et[:, 2]
@@ -1689,6 +2063,23 @@ class WiazkaTrainer:
             out["eval/raw_mrr_traffic"] = raw_stats["mrr"]
             out["eval/mrr_prod_lift_traffic"] = (
                 stats["mrr"] - raw_stats["mrr"])
+            # dial-invariant view of the same probe (see _best_lambda_mrr)
+            t_export = self.model._export_linear(self.model.apply(
+                self.model.base_to_op(self._node_emb_dev[t_src]), t_rel))
+            best, best_lam = self._best_lambda_mrr(
+                self._node_emb_dev[t_src], t_export, t_rel, t_dst,
+                t_others, t_never)
+            out["eval/prod_mrr_traffic_bestlam"] = best
+            out["eval/prod_lambda_traffic"] = best_lam
+            out["eval/mrr_prod_lift_traffic_bestlam"] = (
+                best - raw_stats["mrr"])
+            # the quantity the product actually ships: the traffic MRR with
+            # the per-relation dial fitted on the calibration slice (a few
+            # seconds per call; NaN when there is no slice, i.e. the
+            # historical train-ratio=1.0 / calib-ratio=0 configuration)
+            out["eval/prod_mrr_traffic_calib"] = self._calibrated_traffic_mrr(
+                self._node_emb_dev[t_src], t_export, t_rel, t_dst,
+                t_others, t_never)
 
         out["eval/n_probe"] = float(len(probe))
         # the transport's own contribution, measured on one index

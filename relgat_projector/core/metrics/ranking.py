@@ -100,10 +100,29 @@ def edge_probe(
     edges: Sequence[Tuple[int, int, int]],
     max_probes: int,
     seed: int,
+    unique_by: Optional[str] = None,
 ) -> List[Tuple[int, int, int]]:
-    """Deterministic subset of edges to score (same every eval)."""
-    if len(edges) <= max_probes:
-        return list(edges)
+    """Deterministic subset of edges to score (same every eval).
+
+    ``unique_by="src_rel"`` caps each ``(source, relation)`` at one row: the
+    ranking protocol scores one query against a *set* of answers, so a source
+    with 40 true targets of one relation contributes one query, not 40.  A
+    uniform draw without this cap over-represents exactly those high-target
+    sources, so the metric then describes the target multiplicity of the graph
+    instead of the model.
+    """
+    if unique_by:
+        seen: set = set()
+        kept: List[Tuple[int, int, int]] = []
+        for e in edges:
+            key = (int(e[0]), int(e[2]))
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(e)
+        edges = kept
+        if len(edges) <= max_probes:
+            return list(edges)
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(edges), generator=g)[:max_probes]
     return [edges[i] for i in perm.tolist()]

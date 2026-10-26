@@ -98,8 +98,15 @@ class EmbedderProfile:
         seed: int = 42,
         cos_pairs: int = 60000,
         svd_rows: int = 60000,
+        dup_rows: int = 16384,
+        dup_chunk: int = 256,
     ) -> "EmbedderProfile":
-        """Measure ``x`` (``[N, D]``).  Deterministic in ``seed``."""
+        """Measure ``x`` (``[N, D]``).  Deterministic in ``seed``.
+
+        The 1-NN scan is ``O(rows x N)`` -- against a 243k-node index that is
+        only affordable for a sample, so the duplicate statistic is measured
+        on ``dup_rows`` seeded rows against the whole index.
+        """
         x = x.detach().to(dtype=torch.float32)
         n, d = x.shape
         norms = x.norm(dim=-1)
@@ -134,13 +141,17 @@ class EmbedderProfile:
             eff_rank = float(torch.exp(-(p[nz] * p[nz].log()).sum()))
 
         # 1-NN: chunked so a 243k x 243k Gram matrix is never materialised
+        rows_ids = torch.arange(n, device=x.device)
+        if n > dup_rows:
+            g = torch.Generator(device="cpu").manual_seed(seed + 3)
+            rows_ids = torch.randperm(n, generator=g)[:int(dup_rows)].to(x.device)
         dup_cos = []
-        chunk = 2048
-        for i in range(0, n, chunk):
-            g = u[i:i + chunk] @ u.t()
-            g[:, torch.arange(n, device=x.device)[i:i + chunk]] = -1.0
-            nn_cos = g.max(dim=-1).values
-            dup_cos.append(nn_cos)
+        chunk = max(1, int(dup_chunk))
+        for i in range(0, rows_ids.numel(), chunk):
+            ids = rows_ids[i:i + chunk]
+            g = u[ids] @ u.t()
+            g.scatter_(1, ids.unsqueeze(1), -1.0)
+            dup_cos.append(g.max(dim=-1).values)
         nn_cos = torch.cat(dup_cos)
         dup_1nn_cos = float(nn_cos.mean())
         dup_1nn_fraction = float((nn_cos > 0.999).float().mean())
@@ -179,8 +190,11 @@ class EmbedderProfile:
             target = 1.0
         if target >= 1.0:
             return min(cap, self.dim)
-        for k in sorted(self.explained_variance):
-            if self.explained_variance[str(k)] >= target and int(k) <= cap:
+        # numeric order, not lexicographic: '128' < '32' as strings
+        for k in sorted(self.explained_variance, key=int):
+            if int(k) > cap:
+                continue
+            if self.explained_variance[str(k)] >= target:
                 return int(k)
         # nothing below the cap reaches the target: take the largest that
         # still fits -- the operator may never be wider than the space
@@ -192,10 +206,12 @@ def embedder_profile(
     seed: int = 42,
     cos_pairs: int = 60000,
     svd_rows: int = 60000,
+    dup_rows: int = 16384,
 ) -> EmbedderProfile:
     """Convenience wrapper around :meth:`EmbedderProfile.from_embeddings`."""
     return EmbedderProfile.from_embeddings(
-        x, seed=seed, cos_pairs=cos_pairs, svd_rows=svd_rows
+        x, seed=seed, cos_pairs=cos_pairs, svd_rows=svd_rows,
+        dup_rows=dup_rows,
     )
 
 

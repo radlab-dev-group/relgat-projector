@@ -55,7 +55,27 @@ def get_args() -> argparse.Namespace:
     # operator / architecture
     parser.add_argument("--operator", type=str, default="givens",
                         choices=["givens", "distmult", "transe"])
-    parser.add_argument("--op-dim", type=int, default=256)
+    parser.add_argument("--op-dim", type=int, default=0,
+                        help="operator dimension; 0 = derive it from the "
+                             "base-embedding spectrum (the smallest "
+                             "dimension keeping --op-dim-variance of the "
+                             "variance), which is what makes the method work "
+                             "on embedders of any dimension")
+    parser.add_argument("--op-dim-variance", type=float, default=0.95,
+                        help="variance target of the automatic --op-dim 0")
+    parser.add_argument("--op-dim-cap", type=int, default=0,
+                        help="cap on the automatic op_dim (0 = the space "
+                             "dimension)")
+    parser.add_argument("--base-center", action="store_true",
+                        help="build the operator chart on the mean-centred "
+                             "base embeddings (removes anisotropy from the "
+                             "chart; the export adds the mean back, so the "
+                             "retriever index is untouched)")
+    parser.add_argument("--geometry-auto", action="store_true",
+                        help="scale the cosine knobs (contrast temperature, "
+                             "anchor margin, knn slack) by the ratio of this "
+                             "space's random-pair cosine std to the "
+                             "reference scale they were tuned on")
     parser.add_argument("--num-generators", type=int, default=16)
     parser.add_argument("--gat-num-layers", type=int, default=2)
     parser.add_argument("--gat-heads", type=int, default=2)
@@ -117,6 +137,11 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--train-ratio", type=float, default=0.90,
                         help="fraction of edges used for training; the rest "
                              "is held out from the GAT topology")
+    parser.add_argument("--calib-ratio", type=float, default=0.0,
+                        help="fraction of the held-out edges used to fit the "
+                             "served scalars (dial, prior, ensemble weight); "
+                             "the rest of the held-out set stays the probe. "
+                             "0 = historical behaviour (fit on train edges)")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
@@ -210,6 +235,11 @@ def main() -> None:
 
     cfg = WiazkaConfig(
         op_dim=args.op_dim,
+        op_dim_variance=args.op_dim_variance,
+        op_dim_cap=args.op_dim_cap,
+        base_center=args.base_center,
+        geometry_auto=args.geometry_auto,
+        calib_ratio=args.calib_ratio,
         num_generators=args.num_generators,
         operator_type=args.operator,
         gat_num_layers=args.gat_num_layers,
@@ -358,6 +388,9 @@ def main() -> None:
     report_path = args.report or f"{args.save_dir}/report.json"
     report = {
         "config": dataclasses.asdict(cfg),
+        "base_profile": trainer.base_profile.as_dict(),
+        "geometry": trainer.geometry,
+        "num_calibration_edges": len(trainer.calib_edges),
         "num_nodes": trainer.num_nodes,
         "num_edges_train": len(trainer.edges),
         "num_edges_heldout": len(trainer.eval_edges),
