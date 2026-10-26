@@ -3,6 +3,17 @@
 # WIĄZKA / RGT — relational gauge transport trainer
 # (PLAN.md: F1 nodes -> F2 relations -> F3 composition -> F4 shadows)
 # =============================================================================
+#
+# Every flag below is pinned, because this is the recipe of the BEST run so
+# far: F4_20261026_024039, selection score 0.3361 (against 0.3349 for F1 and
+# 0.3326 for F2, all three re-scored with one protocol on one probe slice).
+# The checkpoint is not in git (``/wiazka-models/*`` is ignored, 1.1 GB a run);
+# this file plus the run's report.json is what reproduces it.  Re-scoring and
+# the label-free health check of the result:
+#
+#   python -m relgat_projector_apps.trainers.score_checkpoints \
+#       wiazka-models/<run>/best --calib-ratio 0.5 --probe 1024
+#   python -m relgat_projector_apps.diagnostics.consistency_report --best
 
 # Device: {cuda, cpu, cuda:x}
 DEVICE="cuda"
@@ -25,6 +36,11 @@ SHADOW_VECTORS=""
 # OPERATOR: {givens, distmult, transe}  (givens = rotation+scale, the method)
 OPERATOR="givens"
 OP_DIM=256
+# ``--op-dim 0`` derives the dimension from the base-embedding spectrum (the
+# smallest one keeping --op-dim-variance of the variance); on this dataset that
+# resolves to 128 (EV@128 = 0.9632).  It stays pinned at 256 (EV@256 = 0.9946)
+# because that is the space the best run was trained and calibrated in --
+# letting it auto-resolve is a different experiment, not this one.
 # K measured on the Slowosiec at 40 epochs (same seed, everything else equal):
 # K=32 against K=16 is worth +0.005 mrr, +0.010 prod_mrr and +0.03 relation
 # naming macro.  K only costs *training* time -- the served query is one
@@ -70,12 +86,25 @@ ANCHOR_MARGIN=0.05
 # the semantic-role relations and pays with the index quality of the relations
 # the base embeddings already encode (measured: id_mrr 0.106 on the refined index
 # against chart_mrr 0.139 for the same vectors unrefined); this hinge is the
-# targeted trade-off knob. Non-zero values are an experiment, not the default.
-KNN_WEIGHT=0.0
+# targeted trade-off knob.
+#
+# The best run trains with it ON: L_knn is what stops the refinement from
+# paying for the semantic-role relations with the index quality of the
+# relations the base embeddings already encode.
+KNN_WEIGHT=1.0
+KNN_K=8
+KNN_SLACK=0.02
+# Fraction of the held-out edges used to FIT the served scalars (transport
+# dial, relation prior, ensemble weight); the rest of the held-out set stays
+# the probe.  With 0 the scalars are fitted on training edges and the
+# checkpoint then ships a dial whose quality was never measured on data
+# disjoint from the data that fitted it.
+CALIB_RATIO=0.5
 # Held-out edges scored at every evaluation (relation-stratified).
 PROBE_SIZE=1024
 # Relations validated with QR-Recall at the end of the run.
 QR_RELATIONS="synonimia,antonimia właściwa,fuzzynimia,derywacyjność"
+QR_MAX_QUERIES=256
 
 # ---------------------------------------------------------------- output
 START_DATE_STR=$(date +%Y%m%d_%H%M%S)
@@ -111,7 +140,11 @@ ARGS=(
   --anchor-weight="${ANCHOR_WEIGHT}"
   --anchor-margin="${ANCHOR_MARGIN}"
   --knn-weight="${KNN_WEIGHT}"
+  --knn-k="${KNN_K}"
+  --knn-slack="${KNN_SLACK}"
+  --calib-ratio="${CALIB_RATIO}"
   --probe-size="${PROBE_SIZE}"
+  --qr-max-queries="${QR_MAX_QUERIES}"
   --qr-relations="${QR_RELATIONS}"
   --save-dir="${OUT_DIR}"
 )

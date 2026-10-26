@@ -153,8 +153,9 @@ relgat-projector-wiazka \
   --device=cuda --save-dir=wiazka-models/run1
 ```
 
-`training_scripts/run-wiazka-trainer.sh` is a ready-to-edit template. The
-trainer runs the `F1 nodes → F2 relations → F3 composition → F4 shadows`
+`training_scripts/run-wiazka-trainer.sh` is the pinned recipe of the best
+run so far (F4, selection score 0.3361) and is ready to edit.  The trainer
+runs the `F1 nodes → F2 relations → F3 composition → F4 shadows`
 curriculum; each stage advances only when its gate is met **on held-out
 edges** (`F1`: the refinement stays near the base embeddings, `F2`: `T_r`
 beats the identity transport **on the same index**, `F3`: two-hop transport
@@ -180,7 +181,7 @@ Knobs worth knowing:
 | `--balance-power` | 0.5 | temper of that sampling: `p(r) ~ count**power`. `1.0` is the raw edge distribution (`synonimia` = 49.7 % of the graph, the 14 relations with <100 edges never appear); `0.0` is uniform and starves the dominant relation to 1.8 % of every batch. 0.5 → 16.3 % / 3.1 % |
 | `--contrast-temperature` | 0.07 | softmax temperature of the contrastive terms (`L_con`, `L_pull`); queries and keys are unit-norm, so this is the only knob that sets how much gradient the *hard* negatives keep |
 | `--pull-weight/--pull-batch` | 1.0 / 256 | `L_pull`, the production term: the exported query must retrieve the gold node from the base index (full softmax over every node, false negatives masked) |
-| `--knn-weight` | 0.0 | `L_knn`: keep chart neighbours neighbours after refinement (`--knn-k`, `--knn-slack`) |
+| `--knn-weight` | 0.0 | `L_knn`: keep chart neighbours neighbours after refinement (`--knn-k`, `--knn-slack`); the best run trains with **1.0** |
 | `--decoder-balance` | 0.5 | class weights of the relation-decoder CE: `w(r) ~ count**-power`. Plain CE on a graph where `synonimia` holds half the edges scored macro relation accuracy 0.019; tempered to match the sampling temper (`--balance-power`) it scores 0.43 in the same epoch |
 | `--decoder-label-smoothing` | 0.05 | label smoothing of the same CE |
 | `--epochs` | 20 | `L_pull` (the export) only exists from `F4` — a run whose `F4` does not last >= 15 epochs undertrains `prod_mrr`. **60 recommended** at `--batch-size=2048`: the curriculum advances in *steps* (F1 400, F2 800, F3 1600), so with 158 steps/epoch `F4` starts around epoch 15 and `prod_mrr` is still climbing at epoch 40. Shrinking the batch shrinks the curriculum in epochs the same way — 128 reaches `F4` inside epoch 3 |
@@ -200,6 +201,23 @@ an Adam step is ~`lr`, so after a few hundred steps `W Wᵀ` was 0.22 away from
 the identity and every exported query had left the retriever space (QR-Recall
 measured exactly 0.0 for all relations). `export_proj` is the gated escape
 hatch: zero-effect at init, opened only by `L_pull`.
+
+### Consistency diagnostics (ideas/12)
+
+A label-free health check of the trained operator: does a document sit near
+its own negation, and does the model know that `T_r T_s != T_s T_r`?
+
+```bash
+python -m relgat_projector_apps.diagnostics.make_consistency_fixture --out-dir data/consistency
+python -m relgat_projector_apps.diagnostics.consistency_report --best
+```
+
+`--best` auto-resolves the best checkpoint by scanning `report.json` (no
+pointer file to go stale).  The fixtures are bilingual (Polish + English),
+the learned operator is scored next to an embedder-free translation
+baseline whose order separation is exactly 0 by construction -- the floor
+the operator has to beat.  Details and the first measured numbers:
+`docs/IDEAS/12-consistency-diagnostics.md`.
 
 ### Reading the evaluation
 

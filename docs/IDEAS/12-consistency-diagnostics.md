@@ -8,9 +8,51 @@ katalogu i od razu mówią, czy operator jest wystarczająco dobry do reszty.
 
 **Prymitywy:** P7 spójność · P6 `C_rs` · P4 `decode` · P1 `apply`/`inverse`
 **Wysiłek:** 3 dni (a) + 3 dni (b) · **Zależności:** minimalne
-**Status:** **najtańszy eksperyment kalibrujący** — sugerowany jako pierwszy
+**Status:** **zaimplementowany** (0.4.1) — `relgat_projector/core/diagnostics/` +
+`python -m relgat_projector_apps.diagnostics.consistency_report --best`;
+dwujęzyczny (PL/EN) fixture w `data/consistency/`
 
 ---
+
+## Stan realizacji (0.4.1)
+
+Zaimplementowano oba testy jako moduł niezależny od embeddera: jedynym
+punktem styku z modelem jest `Transport` (`apply` + `inverse` + `prepare`),
+więc te same dane działają z uczniowskim operatorem (`CheckpointTransport`)
+albo z bazowym transportem translacyjnym (`AdditiveTransport`) — ten drugi
+jest przemienny z definicji i daje separację kolejności oraz holonomię
+równe **dokładnie 0**, więc to on jest podłogą, pod którą uczeń musi wyjść.
+
+Dane testowe (`data/consistency/`, generator
+`relgat_projector_apps.diagnostics.make_consistency_fixture`):
+13 dokumentów (54 tezy, 13 par sprzeczności *z konstrukcji*, nie z adnotacji)
+w PL i EN — spójne, samosprzeczne, greenwashing, wyjątek od wyjątku —
+plus 84 zadania na kolejność relacji i leksykon 69+69 par źródłowych dla
+szóstki relacji leksykalnych.
+
+Pierwszy pomiar (F4, score 0.3361; `ipipan/silver-retriever-base-v1.1`):
+
+| pomiar | wynik |
+|---|---|
+| separacja kolejności, uczeń | mediana **0.188**, max 0.440 (baza translacyjna: **0.000**) |
+| holonomia pętli `r,s,r⁻¹,s⁻¹`, uczeń | średnia **0.120**, max 0.171 |
+| `spearman(sep, C_rs)` na 6 relacjach fixture | **−0.45** (znak dobry) |
+| `C_rs` w całym grafie | zakres [0.462, 0.636] — 1540 par, 0 z "mocnym" dowodem |
+| 12a AUC (PL): S / K / negacja-surface / gold-pary | 0.762 / 0.643 / **0.857** / 0.795 |
+| 12a AUC (EN): S / K / negacja-surface / gold-pary | 0.357 / 0.452 / 0.810 / 0.821 |
+
+Wnioski (zapisane w `CHANGELOG.md` 0.4.1): (1) operator jest silnie
+nieprzemienny — to nie jest Defekt, to cecha, którą DistMult nie da;
+(2) `C_rs` wskazuje właściwy kierunek na relacjach, które się liczą, ale
+w skali całego grafu ma zakres ~0.05 — nadzór nad `C` w `CurvatureLoss`
+faktycznie się nie nauczył, i to jest realny, zmierzony defekt jakości;
+(3) tania negacja-surface ("Nieprawdą jest, że …") **przewyższa**
+relacyjny metryk `S` na tym fixture — do wyprzedzenia, nie do podbijania
+własnych liczb; (4) asymetria PL/EN (0.762 → 0.357) jest miarą tego, jak
+dużo metoda zależy od przestrzeni — odpowiedź pomiarowa na pytanie o
+niezależność od embeddera.
+
+## Punkty odniesienia
 
 ## 12a. Samosprzeczność dokumentu („detektor mowy-zegara")
 
@@ -131,6 +173,7 @@ semantycznych"), a przy okazji kalibruje wszystkie pozostałe pomysły.
   dokument, koszt O(m²) vs O(m).
 - Badania nad składalnością w modelach językowych — 12b jest testem
   konkretnego, algebrycznie zdefiniowanego aspektu składalności.
-- W repo: `core/operator/compiled.py` (`compile` → jeden `matmul`),
+- W repo: `core/diagnostics/consistency.py` (implementacja 12a/12b),
+  `core/operator/compiled.py` (`compile` → jeden `matmul`),
   `handlers/wiazka_checkpoint.py` (`load_commutation`),
-  `core/metrics/geometry.py` (`holonomy_defect`).
+  `core/metrics/geometry.py` (`holonomy_defect` na kwadratach grafu).
