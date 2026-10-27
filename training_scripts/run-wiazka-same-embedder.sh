@@ -34,6 +34,14 @@
 #   --op-dim 0       derives the chart dimension from this space's spectrum
 #                    (256 was a number for the 1152-d space, not a law).
 #
+# The loss *unit* is measured, not assumed (see CHANGELOG 0.4.2): the l2 terms
+# (curvature, shadow, cycle) are absolute distances inside the chart, and this
+# chart's rms is 0.99 against the 0.024 the weights were tuned for, so the
+# trainer divides them by the measured ratio (printed at startup as
+# "[geometry] chart rms=... -> l2 unit=...").  Without it this recipe measures
+# mrr_lift -0.013 and a flat holonomy; with it, +0.065 and C_rs spread over
+# [0.30, 0.94] (30 epochs, seed 42, run S4_20261027_074021).
+#
 DEVICE="cuda"
 CUDA_DEVICES="0"
 

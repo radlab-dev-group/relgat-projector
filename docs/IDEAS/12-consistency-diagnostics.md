@@ -41,6 +41,22 @@ Pierwszy pomiar (F4, score 0.3361; `ipipan/silver-retriever-base-v1.1`):
 | 12a AUC (PL): S / K / negacja-surface / gold-pary | 0.762 / 0.643 / **0.857** / 0.795 |
 | 12a AUC (EN): S / K / negacja-surface / gold-pary | 0.357 / 0.452 / 0.810 / 0.821 |
 
+Drugi pomiar (run kontrolny na tym samym embedderze — `data/same-embedder/`,
+graf re-embedded w `ipipan/silver-retriever-base-v1.1`, tak że operator działa
+na tych samych wektorach, w których oceniane są dokumenty).  S1 = przepust
+nieskalibrowany (przesunięcie jednostki chartu ×41 zostawiało term L2 w
+absolutach); S4 = ten sam przepis z naprawioną jednostką L2, referencją cos
+zmierzoną z F4 i własnym lr dla `C_rs`, 30 epok (F4 z kontekstem):
+
+| pomiar | S1 — bez napraw (60 ep) | S4 — po naprawie (30 ep) |
+|---|---|---|
+| `eval/mrr_lift` | **−0.0065** | **+0.0651** |
+| `eval/mrr` / `rel_acc_macro` | 0.038 / 0.382 | **0.157 / 0.447** |
+| separacja kolejności, uczeń | mediana 0.326, `C_rs` [0.490, 0.535] | mediana **0.306**, `C_rs` **[0.302, 0.935]** |
+| holonomia pętli, uczeń | średnia **0.002** — płaska | średnia **0.0003**, max 0.0010 — **wciąż płaska**, patrz wniosek |
+| 12a AUC (PL): S / K (uczeń) | 0.762 / 0.643 (baza) → 0.667 / 0.643 | 0.762 / 0.643 (baza) → 0.667 / 0.452 |
+| 12a AUC (EN): S / K (uczeń) | 0.357 / 0.452 (baza) → 0.619 / 0.786 | 0.357 / 0.452 (baza) → **0.667 / 0.571** |
+
 Wnioski (zapisane w `CHANGELOG.md` 0.4.1): (1) operator jest silnie
 nieprzemienny — to nie jest Defekt, to cecha, którą DistMult nie da;
 (2) `C_rs` wskazuje właściwy kierunek na relacjach, które się liczą, ale
@@ -51,6 +67,18 @@ relacyjny metryk `S` na tym fixture — do wyprzedzenia, nie do podbijania
 własnych liczb; (4) asymetria PL/EN (0.762 → 0.357) jest miarą tego, jak
 dużo metoda zależy od przestrzeni — odpowiedź pomiarowa na pytanie o
 niezależność od embeddera.
+
+Wniosek z drugiego pomiaru (naprawa jakości, 0.4.2): run kontrolny S1 pokazał,
+że przepis portowany na embedder z normą 23.8 zamiast 0.82 **nie działał** —
+`mrr_lift` ujemny, holonomia płaska (0.002), `C_rs` przyklejone do prioru —
+i winne były *stałe kalibracyjne* (jednostka L2 ×1660 na termach kwadratowych,
+temperatura cos 3× za duża), a nie architektura. Po naprawie (jednostka L2
+mierzonego chartu, referencja cos z profilu F4, lr dla `C_rs`) ten sam przepis
+na tym samym embedderze daje `mrr_lift` **+0.065** (z −0.007), `rel_acc_macro`
+0.447 i `C_rs` rozwarstwione do [0.30, 0.94] — struktura komutacyjna się
+uczy. Holonomia pętli zostaje bliska zeru (0.0003): operator pozostaje w
+praktyce spłaszczony, a to jest następny, niezależny od skali problem
+(brak sygnału krzywizny w gradiencie — patrz `CHANGELOG.md` 0.4.2, "co dalej").
 
 ## Punkty odniesienia
 
