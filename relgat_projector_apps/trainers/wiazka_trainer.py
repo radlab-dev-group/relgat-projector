@@ -131,6 +131,17 @@ def get_args() -> argparse.Namespace:
                         help="score L_con against the K nearest distractors "
                              "instead of the whole key set (0 = full softmax; "
                              "K >= N-1 is exactly the full softmax)")
+    parser.add_argument("--pull-temperature", type=float, default=0.0,
+                        help="temperature of the production term L_pull only; "
+                             "0 = resolve it from the RAW index spread (L_pull "
+                             "scores the exported query against the uncentred "
+                             "base vectors, whose cosine spread is an order of "
+                             "magnitude narrower than the centred chart the "
+                             "shared temperature is calibrated for)")
+    parser.add_argument("--pull-hard-negatives", type=int, default=0,
+                        help="score L_pull against the K nearest distractors "
+                             "of the raw index instead of every node "
+                             "(0 = full softmax)")
     parser.add_argument("--holonomy-squares-only", action="store_true",
                         help="penalise the L_curv closed-loop holonomy only on "
                              "diamonds that are genuine commutation squares "
@@ -323,6 +334,8 @@ def main() -> None:
         anchor_margin=args.anchor_margin,
         contrast_temperature=args.contrast_temperature,
         contrast_hard_negatives=args.contrast_hard_negatives,
+        pull_temperature=args.pull_temperature,
+        pull_hard_negatives=args.pull_hard_negatives,
         holonomy_squares_only=args.holonomy_squares_only,
         order_weight=args.order_weight,
         order_join_weight=args.order_join_weight,

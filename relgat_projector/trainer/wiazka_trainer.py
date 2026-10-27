@@ -169,6 +169,24 @@ class WiazkaConfig:
     #: confusable rivals -- and is cheaper.  ``0`` keeps the historical full
     #: softmax, ``K >= N-1`` reproduces it exactly.
     contrast_hard_negatives: int = 0
+    #: temperature of the *production* term ``L_pull`` only.  ``L_pull`` scores
+    #: the exported query against ``node_emb_fixed`` -- the **raw**, uncentred
+    #: retriever vectors -- while ``contrast_temperature`` is resolved for the
+    #: centred chart.  The two spaces differ enormously: on this chart a random
+    #: pair sits at cos 0.946 +- 0.0085 raw against 0.000 +- 0.107 centred, so
+    #: the centred temperature is ~12.6x too flat here and the softmax over
+    #: 183k keys is nearly uniform (measured ``L_pull`` 10.3 nats against the
+    #: 11.5 a perfect retrieval can reach and the 12.1 of chance: the term is
+    #: the largest single loss, 67 %% of the total, and barely differentiates).
+    #: ``0`` inherits ``contrast_temperature`` (the historical behaviour); the
+#: raw-spread equivalent this space measures is printed at startup as
+#: ``raw-spread equivalent ...`` and persisted in ``config.json``.
+    pull_temperature: float = 0.0
+    #: number of nearest distractors ``L_pull`` scores instead of the whole base
+    #: index; the same argument as ``contrast_hard_negatives`` but applied
+    #: separately, because ``L_pull`` works on the raw index where the
+    #: distractor distribution is much narrower.  ``0`` = full softmax.
+    pull_hard_negatives: int = 0
     #: weight of the *separating* half of the order-dependence teacher inside
     #: ``L_curv``.  The anti-commutation term is a cap (gap must not exceed the
     #: margin), so nothing in the curvature loss ever asks two routes to
@@ -530,6 +548,9 @@ class WiazkaTrainer:
                         sorted(self.base_profile.explained_variance.items(), key=lambda kv: int(kv[0])))
             + f"), base_center={self.cfg.base_center}, "
             f"cosine knobs T={self.geometry['contrast_temperature']:.4f} "
+            f"(L_pull T={float(self.cfg.pull_temperature) if float(self.cfg.pull_temperature) > 0.0 else self.geometry['contrast_temperature']:.4f} "
+            f"on the raw index, std {self.geometry.get('raw_cos_std', 0.0):.4f}, "
+            f"raw-spread equivalent {self.geometry.get('pull_temperature_suggested', 0.0):.4f}) "
             f"anchor_margin={self.geometry['anchor_margin']:.4f} "
             f"knn_slack={self.geometry['knn_slack']:.4f}"
         )
@@ -774,6 +795,12 @@ class WiazkaTrainer:
         # the resolved geometry, not the raw config: with ``geometry_auto`` the
         # numbers below are the configured ones scaled to this base space
         self.contrast_loss = ContrastLoss(self.geometry["contrast_temperature"])
+        # ``L_pull`` scores the exported query against the raw index, so it gets
+        # its own temperature (see ``WiazkaConfig.pull_temperature``)
+        self.pull_contrast_loss = ContrastLoss(
+            float(self.cfg.pull_temperature)
+            if float(self.cfg.pull_temperature) > 0.0
+            else float(self.geometry["contrast_temperature"]))
         self.stability_loss = StabilityLoss(
             anchor_weight=self.cfg.anchor_weight,
             anchor_margin=self.geometry["anchor_margin"],
@@ -1036,6 +1063,8 @@ class WiazkaTrainer:
                 "knn_slack": float(cfg.knn_slack),
                 "cos_std_reference": None,
                 "cos_std_used": None,
+                "pull_temperature_suggested": float(cfg.contrast_temperature),
+                "raw_cos_std": float(profile.pair_cos_std),
             }
         # the reference spread is selected the same way the chart is: a
         # centred chart constrains centred cosines, an as-stored chart the
@@ -1052,6 +1081,12 @@ class WiazkaTrainer:
             "knn_slack": 0.02 * scale,
             "cos_std_reference": float(reference),
             "cos_std_used": float(used),
+            # the production term lives in the raw index, so the temperature
+            # that means the same thing there is the raw-spread one; measured,
+            # not assumed -- ``--pull-temperature`` accepts it explicitly
+            "pull_temperature_suggested": 0.07 * (float(profile.pair_cos_std)
+                                                  / float(REFERENCE_COS_STD_RAW)),
+            "raw_cos_std": float(profile.pair_cos_std),
         }
 
     @staticmethod
@@ -1537,11 +1572,12 @@ class WiazkaTrainer:
                 src[:n_pull], rel[:n_pull], dst[:n_pull], device
             )
             mask_pull[torch.arange(n_pull, device=device), src[:n_pull]] = True
-            l_pull = self.contrast_loss(
+            l_pull = self.pull_contrast_loss(
                 q_pull,
                 self.model.node_emb_fixed,
                 dst[:n_pull],
                 mask=mask_pull,
+                hard_negatives=self.cfg.pull_hard_negatives,
             )
             loss = loss + self.cfg.pull_weight * l_pull
             log["L_pull"] = float(l_pull.item())
