@@ -127,6 +127,42 @@ def get_args() -> argparse.Namespace:
                         help="softmax temperature of the contrastive terms "
                              "(L_con, L_pull); queries/keys are unit-norm, so "
                              "a smaller value weights the hard negatives more")
+    parser.add_argument("--contrast-hard-negatives", type=int, default=0,
+                        help="score L_con against the K nearest distractors "
+                             "instead of the whole key set (0 = full softmax; "
+                             "K >= N-1 is exactly the full softmax)")
+    parser.add_argument("--order-weight", type=float, default=0.0,
+                        help="weight of the order-dependence hinge inside "
+                             "L_curv: a MINIMUM route gap for the relation "
+                             "pairs the graph proves order-dependent "
+                             "(0 disables it = historical loss)")
+    parser.add_argument("--order-join-weight", type=float, default=0.0,
+                        help="weight of the commuting half of the order "
+                             "teacher: where the graph shows the two composed "
+                             "orders r.s and s.r to reach the same "
+                             "neighbourhood they must agree (0 disables it)")
+    parser.add_argument("--order-join-slack", type=float, default=0.005,
+                        help="route gap a proven-commutative pair may keep "
+                             "before the join hinge bites")
+    parser.add_argument("--order-margin", type=float, default=0.0,
+                        help="demanded minimum route gap in chart units "
+                             "(~sqrt(2(1-cos)) for unit vectors: 0.05 ~ 8 deg)")
+    parser.add_argument("--order-batch", type=int, default=512,
+                        help="labelled (a, r, s) examples of the order teacher "
+                             "drawn per training step")
+    parser.add_argument("--no-order-detach-input", dest="order_detach_input",
+                        action="store_false",
+                        help="let the order teacher move the node chart too "
+                             "(default: it shapes only the transport)")
+    parser.add_argument("--order-scan-nodes", type=int, default=40000,
+                        help="nodes probed for order dependence")
+    parser.add_argument("--order-jaccard", type=float, default=0.3,
+                        help="successor-set overlap below which the two "
+                             "relation orders count as disagreeing")
+    parser.add_argument("--order-min-support", type=int, default=3,
+                        help="base points needed before a pair counts")
+    parser.add_argument("--order-min-fraction", type=float, default=0.5,
+                        help="fraction of those base points that must disagree")
     parser.add_argument("--balance-power", type=float, default=0.5,
                         help="temper of relation-balanced sampling: relation p "
                              "proportional to count**power "
@@ -280,6 +316,17 @@ def main() -> None:
         pull_batch=args.pull_batch,
         anchor_margin=args.anchor_margin,
         contrast_temperature=args.contrast_temperature,
+        contrast_hard_negatives=args.contrast_hard_negatives,
+        order_weight=args.order_weight,
+        order_join_weight=args.order_join_weight,
+        order_join_slack=args.order_join_slack,
+        order_margin=args.order_margin,
+        order_batch=args.order_batch,
+        order_detach_input=args.order_detach_input,
+        order_scan_nodes=args.order_scan_nodes,
+        order_jaccard=args.order_jaccard,
+        order_min_support=args.order_min_support,
+        order_min_fraction=args.order_min_fraction,
         balance_power=args.balance_power,
         decoder_balance=args.decoder_balance,
         decoder_label_smoothing=args.decoder_label_smoothing,

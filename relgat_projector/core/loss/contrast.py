@@ -25,6 +25,7 @@ class ContrastLoss(nn.Module):
         keys: torch.Tensor,       # pi(x_j)       [N, D']  (N >= B)
         target_idx: torch.Tensor, # [B] index of x_B in keys
         mask: torch.Tensor | None = None,  # [B, N] True where a false negative
+        hard_negatives: int = 0,  # top-K distractors scored instead of all N
     ) -> torch.Tensor:
         q = F.normalize(query, p=2, dim=-1)
         k = F.normalize(keys, p=2, dim=-1)
@@ -35,4 +36,23 @@ class ContrastLoss(nn.Module):
         if mask is not None:
             logits = logits.masked_fill(mask, float("-inf"))
         labels = target_idx.long()
-        return F.cross_entropy(logits, labels)
+        if hard_negatives <= 0 or hard_negatives >= logits.shape[1] - 1:
+            return F.cross_entropy(logits, labels)
+        # hard-negative variant: score the target against its ``K`` most
+        # similar distractors only, instead of the full key set.  The full
+        # softmax puts ~1e-4 of its mass on 243k irrelevant nodes, so after a
+        # few epochs the gradient is dominated by "be a little more different
+        # from everything" rather than "beat the confusable ones"; the top-K
+        # cut keeps exactly the ranking signal (target above its nearest
+        # rivals) and costs ``B x (K+1)`` instead of ``B x N``.  K >= N-1
+        # reproduces the full softmax exactly, so the default (0) is the
+        # historical path bit for bit.
+        masked = logits.masked_fill(
+            F.one_hot(labels, num_classes=logits.shape[1]).bool(),
+            float("-inf")
+        )
+        rivals = masked.topk(int(hard_negatives), dim=1).values  # [B, K]
+        pos = logits.gather(1, labels[:, None])                 # [B, 1]
+        return F.cross_entropy(torch.cat([pos, rivals], dim=1),
+                               torch.zeros(pos.shape[0], dtype=torch.long,
+                                           device=logits.device))

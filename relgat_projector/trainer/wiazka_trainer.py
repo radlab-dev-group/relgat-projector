@@ -161,6 +161,56 @@ class WiazkaConfig:
     shadow_jitter: float = 0.35
     # F4: shadow vectors drawn per step (PLAN.md 2.6)
     shadow_batch: int = 64
+    #: number of nearest distractors ``L_con`` scores instead of the whole
+    #: key set.  A full softmax over 243k nodes spends almost all of its mass
+    #: on nodes that were never candidates, so the term saturates (measured
+    #: ``L_con`` ~3.4 with a lift of the transport that stopped growing); the
+    #: top-K variant keeps the ranking signal that matters -- gold above its
+    #: confusable rivals -- and is cheaper.  ``0`` keeps the historical full
+    #: softmax, ``K >= N-1`` reproduces it exactly.
+    contrast_hard_negatives: int = 0
+    #: weight of the *separating* half of the order-dependence teacher inside
+    #: ``L_curv``.  The anti-commutation term is a cap (gap must not exceed the
+    #: margin), so nothing in the curvature loss ever asks two routes to
+    #: differ; on this chart the cap is above the largest reachable gap and the
+    #: whole term trains "stay flat" -- closed-loop holonomy 0.0003 against
+    #: 0.120 on the reference.  This hinge is the mirror: where the graph
+    #: proves the composed orders ``r.s`` and ``s.r`` to reach different
+    #: neighbourhoods it asks for ``gap >= order_margin``
+    #: (:meth:`QuadrupleSampler.order_dependence_examples`).
+    #: ``0.0`` leaves the historical loss untouched.
+    order_weight: float = 0.0
+    #: weight of the *commuting* half: where the graph proves the two composed
+    #: orders to reach the same neighbourhood, they must agree.  Without it the
+    #: separating hinge alone would learn "everything differs", which is as
+    #: useless as the flat transport it is here to replace.
+    order_join_weight: float = 0.0
+    #: route gap a proven-commutative pair is allowed to keep (see the loss)
+    order_join_slack: float = 0.005
+    #: smallest route gap demanded of a proven order-dependent pair, in
+    #: *chart units* (the same unit as ``gap_l2``: per-coordinate RMS of the
+    #: route difference divided by the chart unit, so ~``sqrt(2(1-cos))`` for
+    #: unit-length vectors -- 0.05 is ~8 deg, 0.10 ~16 deg)
+    order_margin: float = 0.0
+    #: ``(a, r, s)`` examples of the order teacher drawn per step
+    order_batch: int = 512
+    #: feed the order teacher the base-point vectors *detached*.  The teacher
+    #: is a statement about the transport -- about how two relations compose
+    #: -- and a measured optimisation probe showed why that matters: fitted
+    #: alone it raised the gap of the order-dependent pairs from 0.029 to 0.052
+    #: (so the hinge is satisfiable, the operator can do it) but it did it by
+    #: moving the node chart too, taking cos(refined, base) from 0.947 to 0.78.
+    #: Detaching keeps that force on the rotations, where the curvature lives,
+    #: and leaves the index to ``L_pull`` / ``L_anchor`` / ``L_knn``.
+    order_detach_input: bool = True
+    #: nodes probed for order dependence (see the sampler method)
+    order_scan_nodes: int = 4000
+    #: overlap below which the two composed successor sets count as disagreeing
+    order_jaccard: float = 0.3
+    #: base points needed before a pair counts at all
+    order_min_support: int = 3
+    #: fraction of those base points that must disagree
+    order_min_fraction: float = 0.5
     #: softmax temperature of every contrastive term (``L_con``, ``L_pull``).
     #: Queries and keys are unit-normalised, so this is the only knob that sets
     #: how much gradient the *hard* negatives keep: 0.07 is the SimCLR default,
@@ -674,8 +724,42 @@ class WiazkaTrainer:
         # gaps 0.02-0.06) and the anti-commutation half of the curvature loss
         # silently trains nothing.
         self.curvature_loss = CurvatureLoss(
-            self.num_rel, margin_auto=True, l2_scale=l2_scale
+            self.num_rel, margin_auto=True, l2_scale=l2_scale,
+            order_margin=self.cfg.order_margin,
+            order_weight=self.cfg.order_weight,
+            order_join_weight=self.cfg.order_join_weight,
+            order_join_slack=self.cfg.order_join_slack,
         ).to(self.cfg.device)
+        # the order-dependence teacher is taught from what the graph *proves*,
+        # so it is read off the graph once, here: a run with a non-zero order
+        # weight is self-contained, there is no hand-written pair list to ship
+        # (and no invented non-commutativity either)
+        self._order_pairs: List[Tuple[int, int]] = []
+        self._order_rows: List[Tuple[int, int, int, int]] = []
+        if (self.cfg.order_weight > 0 or self.cfg.order_join_weight > 0) \
+                and self.cfg.order_margin >= 0:
+            self._order_pairs, self._order_rows = (
+                self.quad_sampler.order_dependence_examples(
+                    scan_nodes=self.cfg.order_scan_nodes,
+                    jaccard=self.cfg.order_jaccard,
+                    min_support=self.cfg.order_min_support,
+                    min_fraction=self.cfg.order_min_fraction,
+                )
+            )
+            n_dep = sum(1 for row in self._order_rows if row[3] == 1)
+            names = {v: k for k, v in self.rel2idx.items()}
+            print(
+                f"[curvature] order teacher: {len(self._order_rows)} labelled "
+                f"example(s) over {len(self._order_pairs)} pair(s) "
+                f"({n_dep} order-dependent / "
+                f"{len(self._order_rows) - n_dep} commutative), "
+                f"margin={self.cfg.order_margin:.4f} "
+                f"sep_w={self.cfg.order_weight:.3f} "
+                f"join_w={self.cfg.order_join_weight:.3f}"
+            )
+            for pair in self._order_pairs:
+                print("    " + " x ".join(
+                    names.get(r, str(r)) for r in pair))
         # the resolved geometry, not the raw config: with ``geometry_auto`` the
         # numbers below are the configured ones scaled to this base space
         self.contrast_loss = ContrastLoss(self.geometry["contrast_temperature"])
@@ -1308,7 +1392,8 @@ class WiazkaTrainer:
             # similarity (the query is already near T_r(x_a) in most relations)
             mask[torch.arange(n_con, device=device), src[:n_con]] = True
             l_con = self.contrast_loss(
-                transformed[:n_con], refined, dst[:n_con], mask=mask
+                transformed[:n_con], refined, dst[:n_con], mask=mask,
+                hard_negatives=self.cfg.contrast_hard_negatives,
             )
             loss = loss + l_con
             log["L_con"] = float(l_con.item())
@@ -1354,6 +1439,31 @@ class WiazkaTrainer:
             l_curv = self.curvature_loss(xa, h, r, p, route1, route2)
             loss = loss + l_curv
             log["L_curv"] = float(l_curv.item())
+
+        if (self.stage_manager.is_active("L_curv") and self._order_rows
+                and (self.cfg.order_weight > 0
+                     or self.cfg.order_join_weight > 0)):
+            # the order-dependence teacher.  Both routes here apply the *same
+            # two relations to the same point in the opposite order*, so their
+            # distance is the non-commutativity of the pair -- the one thing
+            # the diamond terms cannot say (a closed quadruple ends both of its
+            # routes at the same node, so it only ever witnesses equality).
+            # The labels come from the graph, once, at construction.
+            rows = self.quad_sampler.sample_order_batch(
+                self.cfg.order_batch, device=device)
+            if rows is not None:
+                o_a, o_r, o_s, o_dep = (rows[:, i] for i in range(4))
+                xo = refined[o_a]
+                if self.cfg.order_detach_input:
+                    xo = xo.detach()
+                order_rs = self.model.apply(self.model.apply(xo, o_r), o_s)
+                order_sr = self.model.apply(self.model.apply(xo, o_s), o_r)
+                taught = self.curvature_loss.order_teacher(
+                    order_rs, order_sr, o_dep.float())
+                loss = loss + taught["total"]
+                log["L_order"] = float(taught["total"].item())
+                log["L_order_sep"] = float(taught["sep"].item())
+                log["L_order_join"] = float(taught["join"].item())
 
         if self.stage_manager.is_active("L_commut"):
             # the commutation matrix C_rs is taught exclusively from the

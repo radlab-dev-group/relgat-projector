@@ -77,6 +77,12 @@ class QuadrupleSampler:
         self._diamonds: Optional[torch.Tensor] = None
         #: (r, p) -> distinct base points at which the routes r.p and p.r meet
         self._witness_table: Optional[Dict[Tuple[int, int], Set[int]]] = None
+        #: relation pairs whose composed successor sets disagree (see
+        #: :meth:`order_dependence_witnesses`); ``None`` = not scanned yet
+        #: order-dependence teacher evidence, filled by
+        #: :meth:`order_dependence_examples` (``None`` = not scanned yet)
+        self._order_pairs: Optional[List[Tuple[int, int]]] = None
+        self._order_rows: Optional[List[Tuple[int, int, int, int]]] = None
 
     # ------------------------------------------------------------ compilation
     def _find_at(self, a: int) -> Optional[Diamond]:
@@ -166,6 +172,118 @@ class QuadrupleSampler:
         if self._diamonds is None:
             self._compile()
         return self._diamonds
+
+    def order_dependence_examples(
+        self,
+        scan_nodes: int = 4000,
+        jaccard: float = 0.3,
+        min_support: int = 3,
+        min_fraction: float = 0.5,
+        max_per_pair: int = 512,
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int]]]:
+        """Labelled ``(a, r, s)`` examples: does the order of ``r, s`` matter?
+
+        The commutation witness table answers "at which base points do the two
+        routes *meet*?".  That is only half of what the curvature loss needs:
+        a one-sided hinge can say "do not pull these apart" but never "push
+        these apart", so nothing ever asks the rotations to rotate -- measured
+        closed-loop holonomy 0.0003 against 0.120 on the reference chart.
+
+        This reads the missing half off the graph.  At a node ``a`` carrying
+        both relations ``r`` and ``s``, compare the composed 2-hop successor
+        *sets* of the two orders: ``a.r.s`` and ``a.s.r``.  Where both are
+        non-empty they either coincide (the order reaches the same
+        neighbourhood -- a commutation fact about the *orders* themselves, not
+        about one closed quadruple) or they do not (the order changes what is
+        reachable).  Each such ``(a, r, s)`` is returned with that verdict as
+        its label, so the loss is taught per example instead of per pair, and
+        pairs whose evidence is mixed -- neither decisively commutative nor
+        decisively order-dependent -- are dropped entirely.
+
+        Cost is a few seconds once; the result is cached.
+        """
+        if self._order_rows is not None:
+            return list(self._order_pairs), list(self._order_rows)
+
+        # node -> {relation: [successors]}, parallel edges merged
+        succ_by_rel: Dict[int, Dict[int, List[int]]] = {}
+        for u, edges in self.out_adj.items():
+            bucket: Dict[int, List[int]] = {}
+            for v, rel in edges:
+                bucket.setdefault(rel, []).append(v)
+            succ_by_rel[u] = bucket
+
+        candidates = [
+            u for u in self._nodes2
+            if len({rel for _, rel in self.out_adj.get(u, [])}) >= 2
+        ]
+        order = list(candidates)
+        self.rng.shuffle(order)
+        if scan_nodes and int(scan_nodes) < len(order):
+            order = order[: int(scan_nodes)]
+
+        support: Dict[Tuple[int, int], int] = {}
+        disagree: Dict[Tuple[int, int], int] = {}
+        rows: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        for a in order:
+            by_rel = succ_by_rel.get(a, {})
+            rels = sorted(by_rel)
+            for i in range(len(rels)):
+                for j in range(i + 1, len(rels)):
+                    r, s = rels[i], rels[j]
+                    forward: set = set()
+                    for mid in by_rel[r]:
+                        forward.update(succ_by_rel.get(mid, {}).get(s, ()))
+                    if not forward:
+                        continue
+                    backward: set = set()
+                    for mid in by_rel[s]:
+                        backward.update(succ_by_rel.get(mid, {}).get(r, ()))
+                    if not backward:
+                        continue  # only one order exists here: no evidence
+                    union = len(forward | backward)
+                    if not union:
+                        continue
+                    key = (r, s)
+                    label = 1 if len(forward & backward) / union < float(jaccard) else 0
+                    support[key] = support.get(key, 0) + 1
+                    disagree[key] = disagree.get(key, 0) + label
+                    rows.setdefault(key, []).append((a, label))
+
+        pairs: List[Tuple[int, int]] = []
+        kept: List[Tuple[int, int, int]] = []
+        frac = float(min_fraction)
+        for key, n in sorted(support.items()):
+            if n < int(min_support):
+                continue
+            rate = disagree[key] / n
+            # decisive either way; a pair that sometimes commutes and sometimes
+            # does not carries no algebraic statement and would teach noise
+            if rate < frac and rate > 1.0 - frac:
+                continue
+            pairs.append(key)
+            for a, label in rows[key][: int(max_per_pair)]:
+                kept.append((a, key[0], key[1], label))
+        self._order_pairs = pairs
+        self._order_rows = kept
+        return list(pairs), list(kept)
+
+    def sample_order_batch(
+        self, batch_size: int, device=None
+    ):
+        """``(a, r, s, dependent)`` long tensors for the order-dependence teacher.
+
+        Both composed orders of the drawn triple exist at ``a`` in the graph by
+        construction (that is what :meth:`order_dependence_examples` checked),
+        so the two routes the loss compares are both realised by real edges of
+        the ontology rather than by an arbitrary pair of relations.
+        """
+        pairs, rows = self.order_dependence_examples()
+        if not rows:
+            return None
+        pick = self.rng.sample(rows, min(int(batch_size), len(rows)))
+        out = torch.tensor(pick, dtype=torch.long)
+        return out if device is None else out.to(device)
 
     def commutation_witnesses(
         self, min_support: int = 3

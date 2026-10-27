@@ -1295,3 +1295,147 @@ def test_trainer_measures_the_l2_unit_from_the_chart():
         batch_size=16, epochs=1, device="cpu", l2_unit_auto=False))
     assert absolute.curvature_loss.l2_scale == 1.0
     assert absolute.shadow_loss.l2_scale == 1.0
+
+
+# ------------------------------------------------------- hard-negative contrast
+def _contrast_case(n_keys=64, dim=16):
+    """A query whose gold is ranked ~4th: a real ranking problem, not a free win."""
+    g = torch.Generator().manual_seed(7)
+    keys = torch.randn(n_keys, dim, generator=g)
+    keys = torch.nn.functional.normalize(keys, dim=-1)
+    # gold is the 4th closest, three distractors are closer
+    q = 0.9 * keys[3] + 0.1 * torch.randn(dim, generator=g)
+    target = torch.tensor([3])
+    return q.unsqueeze(0), keys, target
+
+
+def test_hard_negatives_reproduce_the_full_softmax_when_they_cover_it():
+    """``K >= N-1`` is the full softmax; the default ``K=0`` is too."""
+    from relgat_projector.core.loss.contrast import ContrastLoss
+
+    q, keys, target = _contrast_case()
+    crit = ContrastLoss(temperature=0.07)
+    full = crit(q, keys, target).item()
+    assert crit(q, keys, target, hard_negatives=0).item() == full
+    covering = crit(q, keys, target, hard_negatives=keys.shape[0]).item()
+    assert abs(covering - full) < 1e-6, (covering, full)
+
+
+def test_hard_negatives_score_only_the_confusable_part_of_the_index():
+    """Cutting the key set removes the mass spent on irrelevant distractors.
+
+    A full softmax over a whole index spends most of its gradient saying "be a
+    little less like everything"; the top-K variant keeps the statement that
+    actually matters -- gold above the neighbours it can be confused with --
+    so the same ranking costs strictly less and still has a gradient.
+    """
+    from relgat_projector.core.loss.contrast import ContrastLoss
+
+    q, keys, target = _contrast_case()
+    crit = ContrastLoss(temperature=0.07)
+    full = crit(q, keys, target).item()
+    top16 = crit(q, keys, target, hard_negatives=16).item()
+    assert 0.0 < top16 < full, (top16, full)
+    # and the term is still a real teacher: it moves the query towards gold
+    qq = q.clone().requires_grad_(True)
+    crit(qq, keys, target, hard_negatives=16).backward()
+    grad = qq.grad.squeeze(0)
+    assert grad.norm() > 0
+    towards = (qq.detach().squeeze(0) + 0.05 * (-grad)).norm()
+    cos_before = torch.nn.functional.cosine_similarity(
+        qq.detach(), keys[target], dim=-1).item()
+    after = torch.nn.functional.cosine_similarity(
+        (qq.detach().squeeze(0) - 0.05 * grad).unsqueeze(0),
+        keys[target], dim=-1).item()
+    assert after > cos_before, (after, cos_before)
+    assert towards > 0
+
+
+# ---------------------------------------------------------- order teacher
+def test_order_teacher_is_off_until_it_is_switched_on():
+    """Default weights leave the curvature loss exactly as the old runs had it."""
+    from relgat_projector.core.loss.curvature import CurvatureLoss
+
+    args = _curvature_inputs()
+    old = CurvatureLoss(4, margin_auto=True)(*args).item()
+    new = CurvatureLoss(4, margin_auto=True, order_margin=0.05,
+                        order_weight=8.0, order_join_weight=8.0)(*args).item()
+    assert abs(old - new) < 1e-9, (old, new)
+
+    crit = CurvatureLoss(4, margin_auto=True)
+    a, b = torch.randn(6, 8), torch.randn(6, 8)
+    out = crit.order_teacher(a, b, torch.ones(6))
+    assert float(out["total"]) == 0.0
+
+
+def test_order_teacher_demands_separation_only_where_the_graph_proves_it():
+    """Two populations, two opposite demands, one hinge each.
+
+    The separating half fires on a *small* gap of a dependent pair and stops
+    above the margin; the joining half is silent inside its slack and pulls
+    above it.  Neither half may touch the other population -- that is the whole
+    point of reading the labels off the graph.
+    """
+    from relgat_projector.core.loss.curvature import CurvatureLoss
+
+    crit = CurvatureLoss(4, margin_auto=True, order_margin=0.10,
+                         order_weight=1.0, order_join_weight=1.0,
+                         order_join_slack=0.02)
+    x = torch.randn(4, 8)
+    near = x + 0.01 * torch.randn(4, 8)     # gap ~ 0.01 * scale-ish: below margin
+    far = x + 0.40 * torch.randn(4, 8)      # gap far above the margin
+
+    dep = torch.ones(4)
+    com = torch.zeros(4)
+    # a dependent pair that is too close must cost, and must cost a lot
+    tight = crit.order_teacher(x, far * 0 + near, dep)
+    assert float(tight["total"]) > 0.0
+    assert float(tight["sep"]) > 0.0
+    assert float(tight["join"]) == 0.0, "the joining half must ignore dependents"
+
+    # once the demanded gap is reached the hinge is done with it
+    done = crit.order_teacher(x, x + 0.30 * torch.ones(4, 8), dep)
+    assert float(done["sep"]) == 0.0, float(done["sep"])
+
+    # a commutative pair that is merely close is *allowed* to be close
+    ok = crit.order_teacher(x, near, com)
+    assert float(ok["join"]) == 0.0
+    assert float(ok["sep"]) == 0.0, "the separating half must ignore commutatives"
+
+    # and a commutative pair that drifted apart is an error
+    drifted = crit.order_teacher(x, far, com)
+    assert float(drifted["join"]) > 0.0
+
+
+def test_order_teacher_gradient_opens_the_gap_it_demands():
+    """The hinge must push the routes *apart*, not just report a number."""
+    from relgat_projector.core.loss.curvature import CurvatureLoss
+
+    crit = CurvatureLoss(4, margin_auto=True, order_margin=0.5,
+                         order_weight=1.0)
+    x = torch.randn(8, 16)
+    delta = (crit.route_gap(x, x + 0.05 * torch.ones(8, 16))).mean().item()
+    step = torch.zeros(8, 16, requires_grad=True)
+    crit.order_teacher(x, x + 0.05 * torch.ones(8, 16) + step,
+                       torch.ones(8))["total"].backward()
+    # moving the second route along -grad must increase the gap
+    moved = x + 0.05 * torch.ones(8, 16) - 0.5 * step.grad
+    assert crit.route_gap(x, moved).mean().item() > delta
+
+
+def test_trainer_builds_the_order_teacher_from_the_graph():
+    """A run with the teacher on carries labelled examples and a live term."""
+    node2emb, rel2idx, edges = _toy_graph()
+    quiet = _trainer()
+    assert quiet._order_rows == []
+
+    taught = _trainer(order_weight=4.0, order_join_weight=4.0,
+                      order_margin=0.05, order_scan_nodes=0)
+    assert taught.cfg.order_weight == 4.0
+    assert taught.curvature_loss.order_weight == 4.0
+    # the toy graph is dense enough to show both behaviours
+    assert len(taught._order_rows) > 0
+    assert any(row[3] == 1 for row in taught._order_rows)
+    assert any(row[3] == 0 for row in taught._order_rows)
+    rows = taught.quad_sampler.sample_order_batch(16)
+    assert rows.shape[1] == 4

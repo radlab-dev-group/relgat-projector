@@ -18,6 +18,8 @@ model only has to be *consistent*, not fully commutative.
 
 from __future__ import annotations
 
+from typing import Dict
+
 import torch
 import torch.nn as nn
 
@@ -26,7 +28,11 @@ class CurvatureLoss(nn.Module):
     def __init__(self, num_rel: int, comm_weight: float = 0.5,
                  anti_weight: float = 0.25, margin: float = 0.25,
                  margin_auto: bool = False, margin_floor: float = 0.02,
-                 l2_scale: float = 1.0):
+                 l2_scale: float = 1.0,
+                 order_margin: float = 0.0,
+                 order_weight: float = 0.0,
+                 order_join_weight: float = 0.0,
+                 order_join_slack: float = 0.0):
         super().__init__()
         self.num_rel = int(num_rel)
         self.comm_weight = comm_weight
@@ -57,6 +63,30 @@ class CurvatureLoss(nn.Module):
         # ~0.02-0.06) and so the anti term silently trains on nothing.
         self.margin_auto = bool(margin_auto)
         self.margin_floor = float(margin_floor)
+        # Order-dependence teacher (:meth:`order_teacher`) -- the missing half
+        # of this loss.  Every term above asks the transport to be *flat*: the
+        # holonomy term wants ``H(x) = x``, the commutation term wants
+        # ``C_rs * gap -> 0``, and the anti term is a *cap* that on this chart
+        # sits above the largest reachable gap (margin ~0.04 * ||x|| ~ 0.016
+        # versus gaps of ~0.02), so it is dead.  Nothing ever asks two routes
+        # to *differ* -- which is why the closed-loop holonomy of every run
+        # measured flat, 0.0003 against 0.120 on the reference chart.  The
+        # teacher below demands a minimum gap for exactly the pairs the graph
+        # *proves* order-dependent, and the opposite for the pairs it proves
+        # commutative.  Both weights are ``0.0`` by default, leaving the
+        # historical loss bit-for-bit unchanged.
+        self.order_margin = float(order_margin)
+        self.order_weight = float(order_weight)
+        #: weight of the *commuting* half: where the graph shows the two
+        #: composed orders to reach the same neighbourhood, they must agree.
+        self.order_join_weight = float(order_join_weight)
+        #: gap a commuting pair is *allowed* to keep.  Without slack the join
+        #: hinge is a plain ``w * gap``, i.e. it drags the two orders of every
+        #: commutative pair to exactly zero -- against an anchor, a knn and a
+        #: contrast term that all want the chart to move.  With slack the term
+        #: is silent as soon as the pair is close, which is the statement the
+        #: graph actually supports.
+        self.order_join_slack = float(order_join_slack)
         # C_{rs} as logits over the symmetric matrix; C = sigmoid(C_logit)
         self.comm_logit = nn.Parameter(torch.zeros(num_rel, num_rel))
 
@@ -126,6 +156,50 @@ class CurvatureLoss(nn.Module):
         ).mean()
         loss = loss + comm_part + anti_part
         return loss
+
+    # ----------------------------------------------- order-dependence (teacher)
+    def route_gap(self, route1: torch.Tensor,
+                  route2: torch.Tensor) -> torch.Tensor:
+        """Per-example route distance in chart units (the ``gap_l2`` measure)."""
+        gap = (route1 - route2).pow(2).mean(dim=-1) / (self.l2_scale ** 2)
+        return torch.sqrt(gap + 1e-12)
+
+    def order_teacher(
+        self,
+        route1: torch.Tensor,
+        route2: torch.Tensor,
+        dependent: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """Hinges on the two *composed orders* ``r.s`` and ``s.r`` of a pair.
+
+        ``route1 = T_s(T_r(x))`` and ``route2 = T_r(T_s(x))`` start at the same
+        point and apply the same two relations in the opposite order, so their
+        distance *is* the non-commutativity of the pair.  The diamond routes
+        of :meth:`forward` cannot serve this purpose: both of them end at the
+        same graph node, so a closed quadruple says the two *specific* routes
+        are equivalent, not anything about the order of ``(r, s)`` at all.
+
+        ``dependent`` labels each example from the graph (``1`` where the two
+        composed 2-hop successor sets of that node and pair are
+        (near-)disjoint -- the order changes what is reachable -- ``0`` where
+        they coincide, a genuine commutation identity).  Both halves are
+        therefore teachers with graph-level evidence: see :meth:`Quadruple
+        Sampler.order_dependence_examples`.
+        """
+        gap = self.route_gap(route1, route2)
+        keep = dependent > 0.5
+        zero = gap.new_zeros(())
+        sep = zero
+        join = zero
+        if self.order_weight > 0 and bool(keep.any()):
+            sep = self.order_weight * (
+                (self.order_margin - gap[keep]).clamp_min(0.0).mean()
+            )
+        if self.order_join_weight > 0 and bool((~keep).any()):
+            join = self.order_join_weight * (
+                (gap[~keep] - self.order_join_slack).clamp_min(0.0).mean()
+            )
+        return {"total": sep + join, "sep": sep.detach(), "join": join.detach()}
 
     def supervision(
         self,
