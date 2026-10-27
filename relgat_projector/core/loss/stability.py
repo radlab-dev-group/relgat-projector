@@ -23,6 +23,7 @@ class StabilityLoss(nn.Module):
         isom_delta: float = 0.02,
         anchor_weight: float = 0.5,
         anchor_margin: float = 0.05,
+        l2_scale: float = 1.0,
     ):
         super().__init__()
         self.cycle_weight = cycle_weight
@@ -30,6 +31,11 @@ class StabilityLoss(nn.Module):
         self.isom_delta = isom_delta
         self.anchor_weight = anchor_weight
         self.anchor_margin = anchor_margin
+        #: ``L_cycle`` is the only l2 term in this class (the rest are
+        #: cosines and norm ratios, which are scale-free), so it divides by
+        #: the chart unit like its counterparts in :class:`CurvatureLoss`
+        #: and :class:`ShadowLoss`; 1.0 = historical behaviour.
+        self.l2_scale = float(l2_scale)
 
     def forward(
         self,
@@ -50,7 +56,7 @@ class StabilityLoss(nn.Module):
             diff = t_inv_t_x - x
             loss = loss + self.cycle_weight * torch.sqrt(
                 diff.pow(2).mean() + self.EPS
-            )
+            ) / self.l2_scale
         if None not in (u, v, tu, tv):
             cos_in = F_cos(u, v)
             cos_out = F_cos(tu, tv)

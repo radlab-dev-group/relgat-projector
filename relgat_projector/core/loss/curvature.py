@@ -25,12 +25,30 @@ import torch.nn as nn
 class CurvatureLoss(nn.Module):
     def __init__(self, num_rel: int, comm_weight: float = 0.5,
                  anti_weight: float = 0.25, margin: float = 0.25,
-                 margin_auto: bool = False, margin_floor: float = 0.02):
+                 margin_auto: bool = False, margin_floor: float = 0.02,
+                 l2_scale: float = 1.0):
         super().__init__()
         self.num_rel = int(num_rel)
         self.comm_weight = comm_weight
         self.anti_weight = anti_weight
         self.margin = margin
+        #: The unit of the operator chart, in the units of the space these
+        #: weights were tuned on.  Every term here is an l2 distance *inside
+        #: the chart*, so it inherits the scale of the embedder that produced
+        #: the chart: measured RMS per coordinate is 0.0244 for the Slowosiec
+        #: chart (runs F1-F4, the reference) and 0.99 for
+        #: ipipan/silver-retriever, a factor of ~41 -- and ~1660 on the
+        #: quadratic terms.  Running the reference recipe unchanged on that
+        #: second space measured: total loss 0.33 -> 13.5, the anti-commutation
+        #: hinge going from dead to dominant, a closed-loop holonomy of 0.002
+        #: (flat) against 0.120, and a gate F2 never passed.
+        #:
+        #: ``l2_scale`` is ``rms(this chart) / rms(reference chart)``.  The
+        #: quadratic terms divide by its square and the linear ones by itself,
+        #: which puts every term back at the magnitude the weights were tuned
+        #: for.  1.0 -- what the reference space yields -- reproduces the
+        #: historical behaviour exactly.
+        self.l2_scale = float(l2_scale)
         # ``margin_auto`` rescales the anti-commutation margin to the size of
         # the ambient vectors (see :meth:`effective_margin`): a fixed 0.25 in
         # a 256-d chart of ~unit vectors means "routes must differ by at
@@ -74,7 +92,10 @@ class CurvatureLoss(nn.Module):
         ts_tr: torch.Tensor,              # [B, D]  first route result
         tr_ts: torch.Tensor,              # [B, D]  second route result
     ) -> torch.Tensor:
-        hol = (holonomy_x_a - x_a).pow(2).mean(dim=-1)
+        # see ``l2_scale``: quadratic l2 penalties divide by the square of the
+        # chart unit, linear ones by the unit itself
+        q = self.l2_scale ** 2
+        hol = (holonomy_x_a - x_a).pow(2).mean(dim=-1) / q
         loss = hol.mean()
 
         # ``c_rs`` is *gated* with detach: it is a learned classification of
@@ -87,11 +108,17 @@ class CurvatureLoss(nn.Module):
         # full run every entry sat at 0.49 +- 0.01).
         c = self.commutation().detach()
         c_rs = c[r, s]  # [B]
-        gap = (ts_tr - tr_ts).pow(2).mean(dim=-1)  # [B]
+        gap = (ts_tr - tr_ts).pow(2).mean(dim=-1) / q  # [B]
         # eps inside sqrt: commuting pairs can give a difference of exactly 0
         gap_l2 = torch.sqrt(gap + 1e-12)
         comm_part = self.comm_weight * (c_rs * gap).mean()
-        margin = self.effective_margin(x_a)
+        # ``effective_margin`` is a distance between two transported
+        # vectors, so it is in *chart* units.  ``gap_l2`` is in *unit* terms
+        # (divided by the unit), so the margin must be divided by the unit
+        # too -- and with ``margin_auto`` that is exactly the invariance that
+        # keeps the constraint the same on any chart: a gap of k*margin in
+        # chart units is k*margin in unit terms on both sides.
+        margin = self.effective_margin(x_a) / self.l2_scale
         if margin.dim() == 0:
             margin = margin.expand_as(gap_l2)
         anti_part = self.anti_weight * (

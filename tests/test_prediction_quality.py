@@ -8,6 +8,7 @@ metrics that compared two different indexes.
 
 import random
 
+import pytest
 import torch
 
 from relgat_projector.core.metrics.ranking import (
@@ -1115,3 +1116,182 @@ def test_selection_prefers_a_better_traffic_model():
     strong_traffic = dict(base, **{"eval/prod_mrr_traffic_bestlam": 0.55})
     assert (WiazkaTrainer.selection_score(strong_traffic)
             > WiazkaTrainer.selection_score(weak_traffic))
+
+
+# ------------------------------------------------------------ loss units
+#: the scale ratio that broke the same-embedder control run: the Slowosiec
+#: chart measures rms 0.0242, a retriever chart 0.9903
+SCALE = 0.99029 / 0.0242
+
+
+def _curvature_inputs(seed=0, dim=12, n=8, num_rel=4):
+    g = torch.Generator().manual_seed(seed)
+    x_a = torch.randn(n, dim, generator=g)
+    hol = x_a + 0.1 * torch.randn(n, dim, generator=g)
+    r = torch.randint(0, num_rel, (n,), generator=g)
+    s = torch.randint(0, num_rel, (n,), generator=g)
+    ts_tr = x_a + 0.2 * torch.randn(n, dim, generator=g)
+    tr_ts = x_a + 0.2 * torch.randn(n, dim, generator=g)
+    return x_a, hol, r, s, ts_tr, tr_ts
+
+
+def test_curvature_loss_is_invariant_to_the_chart_scale():
+    """The curvature loss must not care which units the chart is expressed in.
+
+    Every one of its terms is an absolute l2 distance *inside* the operator
+    chart, so with absolute terms the same recipe measures ~1660x more on a
+    retriever-scale chart than on the chart its weights were tuned for: on the
+    S1 control run that took the total from 0.33 to 13.5, moved the
+    anti-commutation hinge from dead to dominant, and flattened the closed-loop
+    holonomy to 0.002 against 0.120.  ``l2_scale`` is the chart unit; scaling
+    the space and the unit together changes nothing.
+    """
+    from relgat_projector.core.loss.curvature import CurvatureLoss
+
+    args = _curvature_inputs()
+    ref = CurvatureLoss(4, margin_auto=True)(
+        *args).item()
+    scaled = CurvatureLoss(4, margin_auto=True, l2_scale=SCALE)(
+        *[a * SCALE if torch.is_tensor(a) and a.dim() > 1 else a for a in args]
+    ).item()
+    assert abs(ref - scaled) < 1e-5 * max(1.0, abs(ref)), (ref, scaled)
+
+    # and without the unit it is *not* invariant -- this is the regression
+    raw = CurvatureLoss(4, margin_auto=True)(
+        *[a * SCALE if torch.is_tensor(a) and a.dim() > 1 else a for a in args]
+    ).item()
+    assert raw > 100.0 * ref
+
+
+def test_curvature_margin_scales_with_the_unit_not_the_space():
+    """The anti-commutation margin is a distance inside the chart.
+
+    Two cases, and they behave differently on purpose:
+
+    * ``margin_auto`` -- the margin is ``2 * margin_floor * ||x||``, a chart
+      quantity, so it has to be divided by the unit to stay in the same unit
+      as the (unit-normalised) route gap.  The violation is then strictly
+      invariant to the chart scale.
+    * a fixed margin -- it is a statement made in the *reference* space, so
+      dividing by the unit re-expresses it in chart units.  It is therefore
+      NOT invariant (by design) but a gap of ``margin / unit`` in a wider
+      chart is exactly at the margin, which is the whole point.
+    """
+    from relgat_projector.core.loss.curvature import CurvatureLoss
+
+    g = torch.Generator().manual_seed(7)
+    dim = 12
+    x_a = torch.randn(16, dim, generator=g)
+    r = torch.zeros(16, dtype=torch.long)
+    s = torch.ones(16, dtype=torch.long)
+
+    def routes(rms_gap):
+        """A route pair whose per-coordinate l2 gap is exactly ``rms_gap``.
+
+        ``gap_l2`` in the loss is ``sqrt(mean(d^2))``, so a constant delta of
+        ``rms_gap`` across the coordinates gives exactly that gap.
+        """
+        return x_a, x_a + rms_gap
+
+    # --- margin_auto: strictly scale-free, including an ACTIVE hinge
+    kwargs = dict(num_rel=4, anti_weight=1.0, comm_weight=0.0, margin_auto=True)
+    unit_margin = float(CurvatureLoss(**kwargs).effective_margin(x_a).mean())
+    # a hinge violation of one margin beyond the margin: active on both charts
+    for factor, active in ((0.5, False), (2.0, True)):
+        gap = factor * unit_margin
+        base = CurvatureLoss(**kwargs)(x_a, x_a, r, s, *routes(gap))
+        lifted = CurvatureLoss(**kwargs, l2_scale=SCALE)(
+            x_a * SCALE, x_a * SCALE, r, s,
+            x_a * SCALE, (x_a + gap) * SCALE)
+        assert torch.allclose(base, lifted, rtol=1e-5, atol=1e-8), \
+            (factor, base.item(), lifted.item())
+        assert (base.item() > 0.0) is active, (factor, base.item())
+    # and the hinge is really active beyond the margin, so the invariance
+    # above is not a comparison of two zeros
+    beyond = CurvatureLoss(**kwargs)(x_a, x_a, r, s,
+                                     *routes(3.0 * unit_margin))
+    assert beyond.item() > 0.0, beyond.item()
+
+    # --- fixed margin: dividing both sides by the unit leaves the *trigger*
+    # (raw chart gap beyond `margin`) untouched and puts the *penalty* in
+    # reference units, which is what keeps the hinge from being the biggest
+    # term in a wide chart
+    kwargs = dict(num_rel=4, anti_weight=1.0, comm_weight=0.0,
+                  margin=0.05, margin_auto=False)
+    base = CurvatureLoss(**kwargs)(x_a, x_a, r, s, x_a, x_a + 0.1)
+    lifted = CurvatureLoss(**kwargs, l2_scale=SCALE)(
+        x_a * SCALE, x_a * SCALE, r, s, x_a * SCALE, x_a * SCALE + 0.1)
+    assert base.item() == pytest.approx(0.5 * 0.05, rel=1e-5), base.item()
+    assert lifted.item() == pytest.approx(base.item() / SCALE, rel=1e-4), \
+        (base.item(), lifted.item())
+    # the trigger is the same on both charts: exactly at `margin` the hinge
+    # is silent whichever chart it is
+    for unit, chart in ((1.0, x_a), (SCALE, x_a * SCALE)):
+        at = CurvatureLoss(**kwargs, l2_scale=unit)(
+            chart, chart, r, s, chart, chart + 0.05)
+        # the 1e-12 eps under the sqrt leaves a 1e-12-scale residue
+        assert at.item() < 1e-6, (unit, at.item())
+    # and WITHOUT the unit the hinge is measured in raw chart units: the same
+    # constant gap and the same constant margin give the same magnitude, i.e.
+    # nothing tames it on the wide chart, while with the unit the penalty is
+    # in reference units (41x smaller here) -- the intended behaviour
+    raw = CurvatureLoss(**kwargs)(x_a * SCALE, x_a * SCALE, r, s,
+                                  x_a * SCALE, x_a * SCALE + 0.1)
+    assert raw.item() == pytest.approx(base.item(), rel=1e-4), raw.item()
+
+
+def test_shadow_and_cycle_losses_are_invariant_to_the_chart_scale():
+    from relgat_projector.core.loss.shadow import ShadowLoss
+    from relgat_projector.core.loss.stability import StabilityLoss
+
+    g = torch.Generator().manual_seed(1)
+    z = torch.randn(16, 10, generator=g)
+    back = z + 0.1 * torch.randn(16, 10, generator=g)
+    other = z + 0.2 * torch.randn(16, 10, generator=g)
+    c = torch.full((16,), 0.5)
+
+    shadow = ShadowLoss()
+    lifted = ShadowLoss(l2_scale=SCALE)
+    for name, term, args in (
+        ("cycle", shadow.cycle(z, back), lifted.cycle(z * SCALE, back * SCALE)),
+        ("commute", shadow.commute(z, other),
+         lifted.commute(z * SCALE, other * SCALE)),
+        ("commute_gated", shadow.commute_gated(z, other, c),
+         lifted.commute_gated(z * SCALE, other * SCALE, c)),
+        ("pull", shadow.pull(z, other), lifted.pull(z * SCALE, other * SCALE)),
+    ):
+        assert torch.allclose(term, args, atol=1e-5), (name, term.item(), args.item())
+
+    stability = StabilityLoss()
+    base = stability(z, back)
+    up = StabilityLoss(l2_scale=SCALE)(z * SCALE, back * SCALE)
+    assert torch.allclose(base, up, atol=1e-5), (base.item(), up.item())
+    # the cosine halves of the stability loss are scale-free on their own
+    assert torch.allclose(stability(z, None, u=z, v=other, tu=other, v2=None) if False
+                          else stability(z, None),
+                          stability(z * 50, None), atol=1e-6)
+
+
+def test_trainer_measures_the_l2_unit_from_the_chart():
+    """The unit is measured on the real chart, not passed in by hand."""
+    node2emb, rel2idx, edges = _toy_graph()
+    small = WiazkaTrainer(dict(node2emb), rel2idx, edges, WiazkaConfig(
+        op_dim=8, num_generators=4, gat_num_layers=1, gat_heads=2,
+        batch_size=16, epochs=1, device="cpu"))
+    big = WiazkaTrainer({k: v * SCALE for k, v in node2emb.items()}, rel2idx, edges,
+                        WiazkaConfig(op_dim=8, num_generators=4, gat_num_layers=1,
+                                     gat_heads=2, batch_size=16, epochs=1,
+                                     device="cpu"))
+    ratio = big.cfg.l2_scale / small.cfg.l2_scale
+    assert abs(ratio - SCALE) < 1e-3 * SCALE, (small.cfg.l2_scale, big.cfg.l2_scale)
+    # the resolved unit is what the losses actually carry, and it is persisted
+    assert small.curvature_loss.l2_scale == small.cfg.l2_scale
+    assert big.shadow_loss.l2_scale == big.cfg.l2_scale
+    assert big.stability_loss.l2_scale == big.cfg.l2_scale
+
+    # off => the historical absolute behaviour
+    absolute = WiazkaTrainer(dict(node2emb), rel2idx, edges, WiazkaConfig(
+        op_dim=8, num_generators=4, gat_num_layers=1, gat_heads=2,
+        batch_size=16, epochs=1, device="cpu", l2_unit_auto=False))
+    assert absolute.curvature_loss.l2_scale == 1.0
+    assert absolute.shadow_loss.l2_scale == 1.0

@@ -26,21 +26,28 @@ class ShadowLoss(nn.Module):
         commut_weight: float = 0.5,
         pull_weight: float = 0.5,
         eps: float = 1e-12,
+        l2_scale: float = 1.0,
     ):
         super().__init__()
         self.cycle_weight = cycle_weight
         self.commut_weight = commut_weight
         self.pull_weight = pull_weight
         self.eps = eps
+        #: Every term here is an l2 distance inside the operator chart, so it
+        #: carries the scale of the embedder that produced the chart.
+        #: Quadratic terms divide by ``l2_scale ** 2``, linear ones by
+        #: ``l2_scale``; see :class:`~relgat_projector.core.loss.curvature.CurvatureLoss`
+        #: for the measurement that motivated it.  1.0 = historical behaviour.
+        self.l2_scale = float(l2_scale)
 
     def cycle(self, z: torch.Tensor, back: torch.Tensor) -> torch.Tensor:
         """``back`` must be ``T_r^{-1}(T_r(z))`` for shadow vectors ``z``."""
         diff = back - z
-        return self.cycle_weight * torch.sqrt(diff.pow(2).mean() + self.eps)
+        return self.cycle_weight * torch.sqrt(diff.pow(2).mean() + self.eps) / self.l2_scale
 
     def commute(self, trst: torch.Tensor, tstr: torch.Tensor) -> torch.Tensor:
         diff = trst - tstr
-        return self.commut_weight * torch.sqrt(diff.pow(2).mean() + self.eps)
+        return self.commut_weight * torch.sqrt(diff.pow(2).mean() + self.eps) / self.l2_scale
 
     def commute_gated(
         self,
@@ -59,7 +66,8 @@ class ShadowLoss(nn.Module):
         together and pairs it believes do not are only required to be
         *consistently* non-commuting.
         """
-        gap = (trst - tstr).pow(2).mean(dim=-1)
+        q = self.l2_scale ** 2
+        gap = (trst - tstr).pow(2).mean(dim=-1) / q
         gap_l2 = torch.sqrt(gap + self.eps)
         comm = (c_rs * gap).mean()
         # ``margin`` is an l2 distance between two transported vectors, so it
@@ -68,9 +76,11 @@ class ShadowLoss(nn.Module):
         # genuinely non-commuting relation pairs are 0.02-0.06).  ``None``
         # derives it from the batch, matching CurvatureLoss.effective_margin.
         if margin is None:
-            m = 2.0 * 0.02 * trst.detach().norm(dim=-1).clamp_min(1e-8)
+            m = (2.0 * 0.02 * trst.detach().norm(dim=-1).clamp_min(1e-8)
+                 / self.l2_scale)
         else:
-            m = torch.as_tensor(margin, device=trst.device).expand_as(gap_l2)
+            m = (torch.as_tensor(margin, device=trst.device)
+                 / self.l2_scale).expand_as(gap_l2)
         anti = ((1.0 - c_rs) * (gap_l2 - m).clamp_min(0.0)).mean()
         return self.commut_weight * (comm + anti)
 
@@ -81,7 +91,7 @@ class ShadowLoss(nn.Module):
     ) -> torch.Tensor:
         """Coherence of the operator with the projection to retriever space."""
         diff = projected_transformed - transformed_projected
-        return self.pull_weight * torch.sqrt(diff.pow(2).mean() + self.eps)
+        return self.pull_weight * torch.sqrt(diff.pow(2).mean() + self.eps) / self.l2_scale
 
     def forward(
         self,
