@@ -121,12 +121,25 @@ class CurvatureLoss(nn.Module):
         s: torch.Tensor,                  # [B] second route's relation id
         ts_tr: torch.Tensor,              # [B, D]  first route result
         tr_ts: torch.Tensor,              # [B, D]  second route result
+        holonomy_mask: torch.Tensor | None = None,  # [B] keep holonomy here
     ) -> torch.Tensor:
         # see ``l2_scale``: quadratic l2 penalties divide by the square of the
         # chart unit, linear ones by the unit itself
         q = self.l2_scale ** 2
         hol = (holonomy_x_a - x_a).pow(2).mean(dim=-1) / q
-        loss = hol.mean()
+        if holonomy_mask is not None:
+            # the closed-loop term states "parallel transport around this
+            # 4-cycle returns what it took".  That is an identity of the graph
+            # only for a *commutation square* (the closing edges are the
+            # opening ones).  For the other diamonds it says "any two paths
+            # meeting at a node carry the same transport", which is not a
+            # commutativity statement but a global flatness one -- and it is
+            # what drove the measured holonomy to 0.0003 (see the trainer's
+            # ``holonomy_squares_only``).  Masking keeps the identity and drops
+            # the assumption; the gap terms below still see every diamond.
+            loss = (hol * holonomy_mask).sum() / holonomy_mask.sum().clamp_min(1.0)
+        else:
+            loss = hol.mean()
 
         # ``c_rs`` is *gated* with detach: it is a learned classification of
         # "do these relations commute?", and the only teacher for it is the

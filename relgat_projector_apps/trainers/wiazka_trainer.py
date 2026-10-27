@@ -131,6 +131,12 @@ def get_args() -> argparse.Namespace:
                         help="score L_con against the K nearest distractors "
                              "instead of the whole key set (0 = full softmax; "
                              "K >= N-1 is exactly the full softmax)")
+    parser.add_argument("--holonomy-squares-only", action="store_true",
+                        help="penalise the L_curv closed-loop holonomy only on "
+                             "diamonds that are genuine commutation squares "
+                             "(q==p and s==r). Only ~6%% of this graph's diamonds "
+                             "are; on the rest the term demands global "
+                             "flatness, not commutativity")
     parser.add_argument("--order-weight", type=float, default=0.0,
                         help="weight of the order-dependence hinge inside "
                              "L_curv: a MINIMUM route gap for the relation "
@@ -317,6 +323,7 @@ def main() -> None:
         anchor_margin=args.anchor_margin,
         contrast_temperature=args.contrast_temperature,
         contrast_hard_negatives=args.contrast_hard_negatives,
+        holonomy_squares_only=args.holonomy_squares_only,
         order_weight=args.order_weight,
         order_join_weight=args.order_join_weight,
         order_join_slack=args.order_join_slack,

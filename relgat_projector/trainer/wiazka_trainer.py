@@ -192,6 +192,17 @@ class WiazkaConfig:
     #: route difference divided by the chart unit, so ~``sqrt(2(1-cos))`` for
     #: unit-length vectors -- 0.05 is ~8 deg, 0.10 ~16 deg)
     order_margin: float = 0.0
+    #: gate the ``L_curv`` holonomy term to *genuine commutation squares*
+    #: (the diamond's closing edges are the two opening ones, ``q == p`` and
+    #: ``s == r``).  Measured on this graph, only **6.1 %** of the sampled
+    #: diamonds are such squares; the other 93.9 % are two unrelated paths that
+    #: happen to reconverge on one node.  Penalising ``||H(x_A) - x_A||`` on
+    #: those does not encode "these two relations commute" -- it encodes "every
+    #: route to that node is the same transport", which flattens the whole
+    #: space.  That is the third, independent reason the closed-loop holonomy
+    #: measured flat (0.0003): the term is not merely weak, on 19/20 of its
+    #: samples it asks for the wrong thing.  ``False`` keeps every diamond.
+    holonomy_squares_only: bool = False
     #: ``(a, r, s)`` examples of the order teacher drawn per step
     order_batch: int = 512
     #: feed the order teacher the base-point vectors *detached*.  The teacher
@@ -1433,10 +1444,19 @@ class WiazkaTrainer:
             h = self.model.apply(h, q)
             h = self.model.inverse(h, s)
             h = self.model.inverse(h, p)
+            hol_mask = None
+            if self.cfg.holonomy_squares_only:
+                # keep only the diamonds that are commutation squares, where
+                # closure is an identity the graph actually states
+                hol_mask = ((q == p) & (s == r)).to(h.dtype)
+                if float(hol_mask.mean()) == 0.0:
+                    hol_mask = None
             # the two routes A->D of the diamond
             route1 = self.model.apply(self.model.apply(xa, r), q)
             route2 = self.model.apply(self.model.apply(xa, p), s)
-            l_curv = self.curvature_loss(xa, h, r, p, route1, route2)
+            l_curv = self.curvature_loss(
+                xa, h, r, p, route1, route2, holonomy_mask=hol_mask
+            )
             loss = loss + l_curv
             log["L_curv"] = float(l_curv.item())
 
