@@ -229,8 +229,12 @@ made statements about the base space it was given, and nothing checked them.
   cosine difference.  In a space whose random pairs sit at cos +0.13 ± 0.147
   (measured) a slack of 0.02 means something different than in an isotropic
   space.  `--geometry-auto` rescales all three by
-  `std(this space) / REFERENCE_COS_STD`, reproducing the shipped defaults
-  exactly on the reference scale and travelling as a ratio elsewhere.
+  `std(this space) / REFERENCE_COS_STD_{RAW,CENTRED}`, reproducing the shipped
+  defaults exactly on the reference scale and travelling as a ratio elsewhere.
+  That reference was itself wrong until 0.4.2: a single guessed 0.047 against
+  the 0.1477 (raw) / 0.1400 (centred) the reference run actually measured, so
+  every knob was inflated ~3x on every other embedder.  It is now the measured
+  Slowosiec profile, selected raw or centred the same way the chart is.
 * **Anisotropy was invisible.**  The base vectors are not unit-norm
   (mean ‖x‖ 0.82) and carry a shared direction (random-pair cosine +0.1323).
   `EmbedderProfile` now records both at startup, prints them, and stores them

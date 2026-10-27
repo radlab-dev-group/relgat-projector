@@ -20,7 +20,8 @@ from relgat_projector.core.model.wiazka import WiazkaModel
 from relgat_projector.core.operator import build_operator
 from relgat_projector.inference import RelationFlow
 from relgat_projector.trainer.wiazka_trainer import (
-    REFERENCE_COS_STD,
+    REFERENCE_COS_STD_CENTRED,
+    REFERENCE_COS_STD_RAW,
     WiazkaConfig,
     WiazkaTrainer,
 )
@@ -118,7 +119,9 @@ def test_geometry_auto_scales_knobs_by_the_cosine_spread():
     trainer = _tiny_trainer(geometry_auto=True, contrast_temperature=0.07,
                             anchor_margin=0.05, knn_slack=0.02)
     used = trainer.geometry["cos_std_used"]
-    scale = used / REFERENCE_COS_STD
+    reference = trainer.geometry["cos_std_reference"]
+    # _tiny_trainer runs base_center=False, so the raw reference is used
+    scale = used / reference
     assert used > 0
     assert abs(trainer.geometry["contrast_temperature"] - 0.07 * scale) < 1e-9
     assert abs(trainer.geometry["anchor_margin"] - 0.05 * scale) < 1e-9
@@ -129,15 +132,35 @@ def test_geometry_auto_scales_knobs_by_the_cosine_spread():
 
 
 def test_reference_scale_reproduces_the_shipped_defaults():
-    """At the reference cosine spread the scaling must be the identity."""
+    """At the reference cosine spread the scaling must be the identity.
+
+    The reference is the Slowosiec profile of run F4 -- the run the shipped
+    knobs were tuned on -- and the raw/centred spread is selected the same
+    way the chart is: an as-stored chart (``base_center=False``, which is how
+    F4 ran) constrains the raw spread, a centred chart the centred one.
+    """
     profile = EmbedderProfile.from_embeddings(
         torch.randn(300, 20), cos_pairs=4000, svd_rows=300, dup_rows=100)
-    object.__setattr__(profile, "pair_cos_std", REFERENCE_COS_STD)
+    object.__setattr__(profile, "pair_cos_std", REFERENCE_COS_STD_RAW)
+    object.__setattr__(profile, "pair_cos_std_centred", REFERENCE_COS_STD_CENTRED)
     cfg = WiazkaConfig(geometry_auto=True)
     g = WiazkaTrainer._resolve_geometry(profile, cfg)
     assert abs(g["contrast_temperature"] - 0.07) < 1e-6
     assert abs(g["anchor_margin"] - 0.05) < 1e-6
     assert abs(g["knn_slack"] - 0.02) < 1e-6
+
+    # the centred chart takes the centred reference
+    cfg = WiazkaConfig(geometry_auto=True, base_center=True)
+    g = WiazkaTrainer._resolve_geometry(profile, cfg)
+    assert abs(g["contrast_temperature"] - 0.07) < 1e-6
+
+    # and the reference that F4 actually used is what the *raw* chart
+    # reproduces: 0.07 / 0.1477 is the ratio that run trained with
+    object.__setattr__(profile, "pair_cos_std", 0.14771294593811035)
+    object.__setattr__(profile, "pair_cos_std_centred", 0.1400369554758072)
+    cfg = WiazkaConfig(geometry_auto=True)
+    g = WiazkaTrainer._resolve_geometry(profile, cfg)
+    assert abs(g["contrast_temperature"] - 0.07) < 1e-6
 
 
 # ------------------------------------------------------------- centring

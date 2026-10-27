@@ -71,6 +71,22 @@ def get_args() -> argparse.Namespace:
                              "base embeddings (removes anisotropy from the "
                              "chart; the export adds the mean back, so the "
                              "retriever index is untouched)")
+    parser.add_argument("--no-l2-unit-auto", dest="l2_unit_auto",
+                        action="store_false",
+                        help="keep the l2 losses (curvature, shadow, cycle) in "
+                             "absolute chart units. They are absolute "
+                             "distances inside the operator chart, so the "
+                             "shipped weights are only calibrated for the chart "
+                             "they were tuned on (rms 0.0242); on a "
+                             "retriever-scale chart (rms ~0.99) the same "
+                             "weights put the anti-commutation hinge at ~95%% "
+                             "of the loss. On by default: this space is "
+                             "measured and the terms divided by the ratio, "
+                             "which is 1.0 -- the historical loss -- on the "
+                             "reference space")
+    parser.add_argument("--l2-scale", type=float, default=0.0,
+                        help="pin the l2 unit to this ratio instead of "
+                             "measuring it (0 = measure)")
     parser.add_argument("--geometry-auto", action="store_true",
                         help="scale the cosine knobs (contrast temperature, "
                              "anchor margin, knn slack) by the ratio of this "
@@ -239,6 +255,8 @@ def main() -> None:
         op_dim_cap=args.op_dim_cap,
         base_center=args.base_center,
         geometry_auto=args.geometry_auto,
+        l2_unit_auto=args.l2_unit_auto,
+        l2_scale=args.l2_scale,
         calib_ratio=args.calib_ratio,
         num_generators=args.num_generators,
         operator_type=args.operator,

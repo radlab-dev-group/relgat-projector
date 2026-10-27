@@ -47,10 +47,37 @@ from relgat_projector.core.geometry.embedder import (
 )
 
 #: random-pair cosine std of the space the shipped cosine knobs were tuned
-#: on (a sentence-embedder scale); ``geometry_auto`` rescales them by the
-#: ratio, so the defaults are reproduced exactly on that space and the
-#: *ratio* is what travels to any other embedder.
-REFERENCE_COS_STD = 0.047
+#: on -- the *measured* Slowosiec profile (run F4), not a guess: the knobs
+#: ``T=0.07``, ``anchor_margin=0.05``, ``knn_slack=0.02`` are the exact values
+#: that run used with ``geometry_auto`` off, so the reference must be the
+#: spread of that same run.  Two constants because the code selects
+#: centred/raw spread the same way the run selected its chart: an as-stored
+#: chart (``base_center=False``, which is how F4 ran) constrains the raw
+#: spread, a centred chart the centred one.
+#:
+#: The previous single constant (0.047, "a sentence-embedder scale") was ~3x
+#: below the reference's real spread (0.1477 raw / 0.1400 centred), which made
+#: ``geometry_auto`` inflate every knob ~3x on any space: measured on the
+#: same-embedder control run that put the contrast temperature at 0.1579
+#: (against 0.053 at the reference ratio), the anchor margin at 0.1128, and
+#: the contrast term at 75-80 % of the total loss near chance (10.5 vs
+#: ln 182960 = 12.1) while the refinement destroyed the index
+#: (anchor 0.999 -> 0.78, MRR 0.15 -> 0.013 in F2).
+REFERENCE_COS_STD_CENTRED = 0.1400369554758072
+REFERENCE_COS_STD_RAW = 0.14771294593811035
+
+#: RMS per coordinate of the operator chart of the space the loss weights were
+#: tuned on (run F4: ``base_to_op(node_emb_fixed)`` of the Slowosiec chart),
+#: measured 0.02419 there against 0.99029 on ipipan/silver-retriever -- a
+#: factor of 41, 1660 on the quadratic terms.  Every l2 loss (curvature,
+#: shadow, cycle) is an absolute distance *inside* the chart and therefore
+#: inherits this scale; the cosine losses do not.  Dividing the l2 terms by
+#: ``l2_scale = rms(this chart) / REFERENCE_CHART_RMS`` puts the loss balance
+#: back where the weights were tuned, and yields exactly 1.0 -- the historical
+#: numbers -- on the reference space.  Same philosophy as
+#: :data:`REFERENCE_COS_STD_RAW` above, applied to the terms that one works in
+#: absolute units instead of cosines.
+REFERENCE_CHART_RMS = 0.0242
 
 
 @dataclass
@@ -85,6 +112,21 @@ class WiazkaConfig:
     #: the probe the metrics come from stays disjoint from the fit.
     #: ``0.0`` keeps the historical (train-edge) behaviour.
     calib_ratio: float = 0.0
+    #: express the l2 losses (curvature, shadow, cycle) in the chart unit of
+    #: the reference space, see :data:`REFERENCE_CHART_RMS`.  ``True`` measures
+    #: the chart RMS of this space and rescales the terms by the ratio; the
+    #: reference space measures 1.0 and reproduces the historical loss exactly.
+    #: ``False`` keeps the raw absolute values -- the behaviour that, ported to
+    #: a retriever-scale embedder, drove the total loss from 0.33 to 13.5 and
+    #: collapsed the closed-loop holonomy to 0.002 (flat).
+    l2_unit_auto: bool = True
+    #: manual override of the measured ratio (``0.0`` = measure it); exists so
+    #: a screening run can pin the unit instead of inheriting the measurement
+    l2_scale: float = 0.0
+    #: RMS per coordinate of this run's operator chart, measured at build time
+    #: (``base_to_op(node_emb_fixed)``); persisted so a checkpoint says which
+    #: unit its losses were expressed in.  ``0.0`` = not measured yet.
+    chart_rms: float = 0.0
     #: scale the cosine-scale knobs off the measured random-pair cosine
     #: standard deviation of *this* space instead of assuming the SimCLR
     #: scale (0.07 temperature ~ 1.5x a 0.047 std).  The reference space is
@@ -203,6 +245,13 @@ class WiazkaConfig:
     #: 35-epoch run every dial had moved 0.04 in logit space and sat at
     #: ``lam ~ 0.81``, the relation-blind answer it started with.
     dial_lr_scale: float = 20.0
+    #: learning-rate multiplier of the commutation matrix ``C_rs``.  It is
+    #: ``num_rel ** 2`` bounded logits taught by a *sample* of the witness
+    #: table (16 pairs a step against ~2900 negative ordered pairs), so at the
+    #: base lr its entries barely leave 0.5 inside one run: measured on the
+    #: 12-epoch same-embedder screen every cell still sat at 0.500 +- 0.000,
+    #: i.e. the commutation structure the method exists to learn never moved.
+    comm_lr_scale: float = 20.0
     #: weight of ``L_pull`` -- the *production* term: an exported transformed
     #: query must retrieve the right node from the base index (what the vector
     #: database actually holds).  Scored with the same full softmax as the
@@ -568,6 +617,27 @@ class WiazkaTrainer:
             freeze_projection=proj_weight is not None,
         ).to(self.cfg.device)
 
+        # ------------------------------------------------- chart loss unit
+        # measured here, before the losses below are constructed: it is the
+        # only place that knows both the chart and the weights tuned for it
+        self.cfg.chart_rms = self._chart_rms(self.model)
+        if float(self.cfg.l2_scale) > 0.0:
+            l2_scale = float(self.cfg.l2_scale)
+            unit_source = "override"
+        elif self.cfg.l2_unit_auto:
+            l2_scale = self.cfg.chart_rms / REFERENCE_CHART_RMS
+            unit_source = "measured"
+        else:
+            l2_scale = 1.0
+            unit_source = "off (absolute chart units)"
+        self.cfg.l2_scale = float(l2_scale)
+        print(
+            f"[geometry] chart rms={self.cfg.chart_rms:.5f} "
+            f"(reference {REFERENCE_CHART_RMS}) -> l2 unit={l2_scale:.4f} "
+            f"[{unit_source}]: curvature/shadow/cycle losses divided by this, "
+            f"so 1.0 reproduces the reference loss exactly"
+        )
+
         # samplers
         out_adj, in_adj = _build_adjacency(self.edges, self.num_nodes)
         deg = np.array(
@@ -604,7 +674,7 @@ class WiazkaTrainer:
         # gaps 0.02-0.06) and the anti-commutation half of the curvature loss
         # silently trains nothing.
         self.curvature_loss = CurvatureLoss(
-            self.num_rel, margin_auto=True
+            self.num_rel, margin_auto=True, l2_scale=l2_scale
         ).to(self.cfg.device)
         # the resolved geometry, not the raw config: with ``geometry_auto`` the
         # numbers below are the configured ones scaled to this base space
@@ -612,8 +682,9 @@ class WiazkaTrainer:
         self.stability_loss = StabilityLoss(
             anchor_weight=self.cfg.anchor_weight,
             anchor_margin=self.geometry["anchor_margin"],
+            l2_scale=l2_scale,
         )
-        self.shadow_loss = ShadowLoss()
+        self.shadow_loss = ShadowLoss(l2_scale=l2_scale)
         self.decoder_loss = DecoderLoss(
             label_smoothing=self.cfg.decoder_label_smoothing,
         )
@@ -708,6 +779,13 @@ class WiazkaTrainer:
         no_decay_params = [p for p in no_decay_params if id(p) not in dial_ids]
         dial_params = [p for p in self.model.parameters()
                        if id(p) in dial_ids and p.requires_grad]
+        # C_rs is a bounded classification taught by a witness sample, not a
+        # weight matrix: the same under-training story as the dial, one
+        # param group with a larger step
+        comm_ids = {id(self.curvature_loss.comm_logit)}
+        no_decay_params = [p for p in no_decay_params if id(p) not in comm_ids]
+        comm_params = [p for p in self.curvature_loss.parameters()
+                       if id(p) in comm_ids and p.requires_grad]
         groups = [
             {"params": decay_params, "weight_decay": self.cfg.weight_decay},
             {"params": no_decay_params, "weight_decay": 0.0},
@@ -717,6 +795,12 @@ class WiazkaTrainer:
                 "params": dial_params,
                 "weight_decay": 0.0,
                 "lr": self.cfg.lr * float(self.cfg.dial_lr_scale),
+            })
+        if comm_params:
+            groups.append({
+                "params": comm_params,
+                "weight_decay": 0.0,
+                "lr": self.cfg.lr * float(self.cfg.comm_lr_scale),
             })
         self.optimizer = torch.optim.AdamW(groups, lr=self.cfg.lr)
         self._scheduler = None
@@ -858,16 +942,44 @@ class WiazkaTrainer:
                 "cos_std_reference": None,
                 "cos_std_used": None,
             }
+        # the reference spread is selected the same way the chart is: a
+        # centred chart constrains centred cosines, an as-stored chart the
+        # raw ones -- using the wrong one would offset every knob by the
+        # anisotropy of the reference
         used = (profile.pair_cos_std_centred if cfg.base_center
                 else profile.pair_cos_std)
-        scale = float(used) / REFERENCE_COS_STD
+        reference = (REFERENCE_COS_STD_CENTRED if cfg.base_center
+                     else REFERENCE_COS_STD_RAW)
+        scale = float(used) / float(reference)
         return {
             "contrast_temperature": 0.07 * scale,
             "anchor_margin": 0.05 * scale,
             "knn_slack": 0.02 * scale,
-            "cos_std_reference": REFERENCE_COS_STD,
+            "cos_std_reference": float(reference),
             "cos_std_used": float(used),
         }
+
+    @staticmethod
+    def _chart_rms(model: "WiazkaModel", chunk: int = 32768) -> float:
+        """RMS per coordinate of the operator chart, measured rather than assumed.
+
+        This is the unit every l2 loss of the method is expressed in: the
+        curvature, shadow and cycle terms are absolute distances *inside* the
+        chart, so they scale with the embedder that produced it (0.0242 for the
+        Slowosiec chart the shipped weights were tuned on, 0.9903 for a
+        retriever embedder).  The chart map is frozen at the principal subspace
+        and the node table is fixed, so measuring before training gives the
+        same number as after; it depends on the embedder, not on the weights.
+        """
+        emb = model.node_emb_fixed
+        with torch.no_grad():
+            total = 0.0
+            count = 0
+            for i in range(0, emb.shape[0], chunk):
+                block = model.base_to_op(emb[i:i + chunk]).double()
+                total += float(block.pow(2).sum())
+                count += block.numel()
+        return float((total / max(1, count)) ** 0.5)
 
     def _calibration_edges(self) -> List[Tuple[int, int, int]]:
         """Edges the served scalars are fitted on -- never the scored ones.
@@ -1410,6 +1522,24 @@ class WiazkaTrainer:
                 )
                 + f" | lr={self.optimizer.param_groups[0]['lr']:.2e}"
             )
+            # the loss-term breakdown, on its own line: a term that has gone
+            # dead (or dominant) is the single most common failure mode of
+            # this stack, and it is invisible in a total.  Porting the recipe
+            # to a retriever-scale embedder put the anti-commutation hinge at
+            # ~95 % of the loss while the total looked merely "large"; with
+            # this line it is two epochs of reading instead of one whole run.
+            terms = {k: v for k, v in avg.items() if k.startswith("L_")}
+            if terms:
+                total = sum(terms.values()) or 1e-12
+                print(
+                    f"[epoch {epoch} losses] "
+                    + " ".join(
+                        f"{k}={v:.4f}({100.0 * v / total:.0f}%)"
+                        for k, v in sorted(
+                            terms.items(), key=lambda kv: -kv[1]
+                        )
+                    )
+                )
             score = self.selection_score(eval_metrics)
             if score > best_score:
                 best_score, best_step = score, global_step
