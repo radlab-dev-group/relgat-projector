@@ -269,3 +269,50 @@ def test_fixture_is_consistent_and_bilingual():
         assert all(t["desc_a"]["pl"] and t["desc_b"]["en"] for t in tasks)
         # and the two order readings really differ, per task and per language
         assert all(t["desc_a"][lang] != t["desc_b"][lang] for t in tasks for lang in ("pl", "en"))
+
+
+def test_pair_contradiction_scores_report_the_do_nothing_floor():
+    """The transported AUC is unreadable without its raw-cosine floor.
+
+    ``auc_identity`` is the AUC of the same pairs scored by plain
+    ``cos(c_i, c_j)``: a transport that does nothing.  ``auc_delta`` is the
+    AUC of the change the transport induces.  For the identity transport
+    ``auc`` and ``auc_identity`` must coincide and ``auc_delta`` must be
+    0.5 (it scores 0 on every pair).
+    """
+    torch.manual_seed(0)
+    dim = 32
+
+    class IdentityTransport(Transport):
+        def __init__(self):
+            self.relations = ("antonimia właściwa",)
+
+        def apply(self, x, rel):
+            return x
+
+        def inverse(self, x, rel):
+            return x
+
+    c0 = torch.nn.functional.normalize(torch.randn(dim), dim=-1)
+    c1 = -c0
+    c2 = torch.nn.functional.normalize(torch.randn(dim), dim=-1)
+    claims = torch.stack([c0, c1, c2])
+    result = pair_contradiction_scores(claims, IdentityTransport(), [[0, 1]])
+    assert result["auc"] == pytest.approx(result["auc_identity"])
+    assert result["auc_delta"] == pytest.approx(0.5)
+
+    # a real transport moves the numbers: its delta must not be pinned at 0.5
+    # unless it happens to preserve every pair's raw score exactly
+    class AntTransport(Transport):
+        def __init__(self):
+            self.relations = ("antonimia właściwa",)
+
+        def apply(self, x, rel):
+            return -x
+
+        def inverse(self, x, rel):
+            return -x
+
+    anti = pair_contradiction_scores(claims, AntTransport(), [[0, 1]])
+    assert anti["auc"] == pytest.approx(1.0)
+    assert anti["auc_delta"] >= anti["auc_identity"]

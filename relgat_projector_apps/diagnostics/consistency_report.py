@@ -136,7 +136,10 @@ def run_documents(documents: List[Dict], embed: Embedder, lang: str,
         gold = pair_contradiction_scores(claims, transport, doc["contradictions"])
         rows.append({"id": doc["id"], "label": doc["label"],
                      "n_claims": len(texts),
-                     "gold_pair_auc": gold["auc"], "n_gold_pairs": gold["n_gold"],
+                     "gold_pair_auc": gold["auc"],
+                     "gold_pair_auc_identity": gold["auc_identity"],
+                     "gold_pair_auc_delta": gold["auc_delta"],
+                     "n_gold_pairs": gold["n_gold"],
                      **scores})
 
     labels = [1.0 if r["label"] in POSITIVE_LABELS else 0.0 for r in rows]
@@ -160,6 +163,10 @@ def run_documents(documents: List[Dict], embed: Embedder, lang: str,
             "contradictory": {name: mean(contra, key) for name, key, _ in DOCUMENT_METRICS},
         },
         "gold_pair_auc_mean": float(np.nanmean([r["gold_pair_auc"] for r in rows])),
+        "gold_pair_auc_identity_mean": float(
+            np.nanmean([r["gold_pair_auc_identity"] for r in rows])),
+        "gold_pair_auc_delta_mean": float(
+            np.nanmean([r["gold_pair_auc_delta"] for r in rows])),
     }
 
 
@@ -251,18 +258,29 @@ def _print_document_report(report: Dict, lang: str, title: str) -> None:
           + "".join(f"{contra[name]:>7.3f}" for name, _, _ in DOCUMENT_METRICS))
     print("AUC contradictory-vs-coherent: " + "  ".join(
         f"{name}={report['auc'][name]:.3f}" for name, _, _ in DOCUMENT_METRICS))
-    print(f"gold contradiction pairs: mean AUC = {report['gold_pair_auc_mean']:.3f}")
+    print(f"gold contradiction pairs: mean AUC = {report['gold_pair_auc_mean']:.3f}"
+          f"   do-nothing floor (raw cosine) = {report['gold_pair_auc_identity_mean']:.3f}"
+          f"   lift = {report['gold_pair_auc_mean'] - report['gold_pair_auc_identity_mean']:+.3f}")
+    print(f"  AUC of the change the transport induces = "
+          f"{report['gold_pair_auc_delta_mean']:.3f} (0.5 = it added no ordering)")
 
 
 def _auc_row(report: Dict) -> Dict[str, float]:
     row = dict(report["auc"])
     row["goldPair"] = report["gold_pair_auc_mean"]
+    # the transported AUC cannot be read on its own: raw cosine already ranks
+    # these contradictions (the identity floor, measured per document), so the
+    # comparable quantity is the lift over that floor
+    row["goldPairLift"] = (report["gold_pair_auc_mean"]
+                           - report["gold_pair_auc_identity_mean"])
+    row["goldPairDelta"] = report["gold_pair_auc_delta_mean"]
     return row
 
 
 def _print_transport_comparison(lang: str, additive: Dict, learned: Dict) -> None:
     """AUC table of the same 12a metrics under both transports, plus delta."""
-    columns = [name for name, _, _ in DOCUMENT_METRICS] + ["goldPair"]
+    columns = [name for name, _, _ in DOCUMENT_METRICS] + [
+        "goldPair", "goldPairLift", "goldPairDelta"]
     base, model_auc = _auc_row(additive), _auc_row(learned)
     print(f"\n=== 12a learned operator vs translation baseline [{lang}] ===")
     header = f"{'variant':<26}" + "".join(f"{c:>10}" for c in columns)

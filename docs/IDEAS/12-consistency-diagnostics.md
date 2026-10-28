@@ -115,6 +115,21 @@ Trzecia wersja (najmniej kosztowna, bez tez): holonomia `HD` na pętli `syn ∘ 
 ∘ syn ∘ ant` wokół wektora dokumentu. Wysoka krzywizna = wektor nie leży w
 regionie, w którym te relacje są spójne, czyli tekst stoi „pomiędzy" znaczeniami.
 
+**Gold pary a podłoga „nie ruszaj" (zmierzona 2026-10-28, S10 vs S4).** Metryka
+gold-par (AUC: czy `T_ant` zbliża pary rzeczywiście sprzeczne) nie da się odczytać
+sama w sobie, bo pary te są zdaniami *o tym samym temacie*, a te same tematy są już
+podobne: na fixture dwujęzycznym transport **tożsamościowy** (brak modelu) daje
+AUC **0.714** — podłoga, którą operator musi przebić. Wynik 0.62 (S10) to więc *poniżej
+podłogi*, co goły AUC nie pokazywał; S4 dawał 0.786 (+0.07). Z tego powodu raport
+wydaje teraz trzy liczby na parę: `auc` (przeniesiona), `auc_identity` (ta sama para
+ocena `cos(c_i, c_j)` — transport nic nie robi) i `auc_delta` (AUC *zmiany*, jaką
+wprowadza transport: `cos(T_ant c_i, c_j) − cos(c_i, c_j)`; tożsamość daje tu
+dokładnie 0, czyli AUC 0.5). Analogicznie jak 12b ma `AdditiveTransport` jako
+podłogę nieprzemienności — każdy nauczony transport ma podłogę, którą musi przebić,
+a 12a nie miał żadnej. Zmierzone `auc_delta`: S4 0.625, S10 0.548 (przy AUC
+przeniesionym 0.786 / 0.621): sygnał kierunku antonimii osłabł, ale nie zniknął —
+regresja 12a jest realna, lecz mniejsza, niż sugerował goły AUC.
+
 ### Metryki i baseline
 
 | metryka | gold | baseline |

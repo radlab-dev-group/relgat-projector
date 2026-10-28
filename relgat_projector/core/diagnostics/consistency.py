@@ -324,24 +324,50 @@ def pair_contradiction_scores(
     ``gold_pairs`` holds claim-index pairs that contradict by construction.
     A pair is scored ``0.5 * (cos(T_ant c_i, c_j) + cos(T_ant c_j, c_i))`` and
     the gold pairs are separated from the rest by :func:`roc_auc`.
+
+    Three AUCs are reported, because the transported one cannot be read on
+    its own:
+
+    * ``auc`` -- the transported score, as defined above;
+    * ``auc_identity`` -- the *same* pairs scored by ``cos(c_i, c_j)``, i.e.
+      the AUC of a transport that does nothing.  The fixture's contradictions
+      are sentences *about the same topic*, and same-topic sentences are
+      already similar: measured on the bilingual fixture the identity
+      transport scores **0.714**, so a learned operator scoring 0.62 is
+      *below its own floor*, which ``auc`` alone does not show.  It is the
+      same argument 12b makes with the commutative ``AdditiveTransport``:
+      every learned transport has a floor to beat, and 12a had none.
+    * ``auc_delta`` -- the AUC of the score's *change*,
+      ``cos(T_ant c_i, c_j) - cos(c_i, c_j)``: the identity transport scores
+      exactly 0 on every pair here, so this is 0.5 by construction and the
+      number says how much ordering the transport **added**, independent of
+      how much raw similarity the space happened to carry.
     """
     claims = _unit(transport.prepare(claims))
     m = int(claims.shape[0])
     ant = transport.apply(claims, rel_ant)
     score = _off_diagonal(0.5 * (ant @ claims.t() + claims @ ant.t()))
+    identity = _off_diagonal(claims @ claims.t())
+    delta = score - identity
     gold = set()
     for a, b in gold_pairs:
         gold |= {(int(a), int(b)), (int(b), int(a))}
     labels: List[float] = []
     vals: List[float] = []
+    id_vals: List[float] = []
+    delta_vals: List[float] = []
     for i in range(m):
         for j in range(i + 1, m):
             labels.append(1.0 if (i, j) in gold else 0.0)
             vals.append(float(score[i, j]))
+            id_vals.append(float(identity[i, j]))
+            delta_vals.append(float(delta[i, j]))
     pos = [v for v, l in zip(vals, labels) if l > 0.5]
     neg = [v for v, l in zip(vals, labels) if l < 0.5]
     return {
         "auc": roc_auc(labels, vals),
+        "auc_identity": roc_auc(labels, id_vals),
+        "auc_delta": roc_auc(labels, delta_vals),
         "n_gold": len(pos),
         "n_pairs": len(vals),
         "mean_gold": float(np.mean(pos)) if pos else float("nan"),
