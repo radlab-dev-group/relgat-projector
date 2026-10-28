@@ -195,6 +195,15 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--commutation-weight", type=float, default=1.0,
                         help="weight of the order-supervised C_rs term "
                              "(only with --commutation-from-order)")
+    parser.add_argument("--no-duplicate-mask", dest="duplicate_mask",
+                        action="store_false",
+                        help="do NOT hide a gold target's bit-identical twins "
+                             "in the raw index when masking L_pull negatives. "
+                             "52.1%% of this index's nodes share their vector "
+                             "with at least one other node, so unmasked the "
+                             "gold can never beat its own twin: an irreducible "
+                             "cross-entropy floor of ~0.62 nats and 53%% of "
+                             "probe golds scored against an identical vector")
     parser.add_argument("--balance-power", type=float, default=0.5,
                         help="temper of relation-balanced sampling: relation p "
                              "proportional to count**power "
@@ -364,6 +373,7 @@ def main() -> None:
         order_min_fraction=args.order_min_fraction,
         commutation_from_order=args.commutation_from_order,
         commutation_weight=args.commutation_weight,
+        duplicate_mask=args.duplicate_mask,
         balance_power=args.balance_power,
         decoder_balance=args.decoder_balance,
         decoder_label_smoothing=args.decoder_label_smoothing,

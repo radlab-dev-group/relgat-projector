@@ -226,6 +226,16 @@ class WiazkaConfig:
     #: weight of the order-supervised ``L_commut`` term (``False`` above keeps
     #: the historical unit weight)
     commutation_weight: float = 1.0
+    #: treat bit-identical base vectors as the same answer: the false-negative
+    #: mask then hides every row of a gold target's *vector group* (and of each
+    #: other true target's group), not only the rows the graph lists.  On this
+    #: space 52.1 % of the 182 960 nodes are bit-identical to at least one
+    #: other node (max group 27), so the unmasked term scored 53.1 % of the
+    #: probe golds against vectors *identical to the answer* -- an irreducible
+    #: cross-entropy floor of 0.67 nats (the target can never win the softmax
+    #: against its own twin).  ``True`` removes that floor; ``False`` keeps the
+    #: historical mask.
+    duplicate_mask: bool = True
     #: gate the ``L_curv`` holonomy term to *genuine commutation squares*
     #: (the diamond's closing edges are the two opening ones, ``q == p`` and
     #: ``s == r``).  Measured on this graph, only **6.1 %** of the sampled
@@ -638,6 +648,23 @@ class WiazkaTrainer:
             self._targets_by_src_rel.setdefault((s, r), []).append(d)
         for s, d, r in self.eval_edges:
             self._targets_by_src_rel.setdefault((s, r), []).append(d)
+
+        # duplicate-vector groups of the RAW index (see WiazkaConfig.duplicate_mask)
+        self._dup_gid: Optional[torch.Tensor] = (
+            self._compute_duplicate_groups(self.node_emb)
+            if self.cfg.duplicate_mask
+            else None
+        )
+        if self._dup_gid is not None:
+            sizes = torch.bincount(self._dup_gid)
+            multi = int((sizes > 1).sum())
+            dup_nodes = int((sizes[self._dup_gid] > 1).sum())
+            print(
+                f"[geometry] raw-index duplicate groups: {multi} "
+                f"(covering {dup_nodes / self.num_nodes:.1%} of the "
+                f"{self.num_nodes} nodes, largest {int(sizes.max())}) "
+                "-- L_pull masks each gold's whole group"
+            )
         # node -> relation types it really participates in: the applicability
         # head may only be taught "not applicable" for a relation that is truly
         # absent from that node's neighbourhood
@@ -1245,6 +1272,42 @@ class WiazkaTrainer:
             ] = True
         return mask
 
+    def _compute_duplicate_groups(self, node_emb: torch.Tensor) -> torch.Tensor:
+        """``[N]`` int64 group id of each row under *bitwise* equality.
+
+        The retriever index is the stored vectors: two nodes with identical
+        vectors are indistinguishable answers for any query, so the contrast
+        term must treat them as one key.  Hashing the raw bytes of every row
+        (``np.unique`` on the byte view) groups exactly the bit-identical
+        vectors -- the near-duplicates (cos ~ 0.99) are *not* merged, and a
+        float rounding of a shared vector is not a false group either.
+        """
+        x = np.ascontiguousarray(
+            node_emb.detach().cpu().numpy(), dtype=np.float32
+        )
+        flat = x.view(np.uint8).reshape(x.shape[0], -1)
+        _, inverse = np.unique(flat, axis=0, return_inverse=True)
+        return torch.from_numpy(
+            np.asarray(inverse, dtype=np.int64).reshape(-1)
+        )
+
+    def _duplicate_columns(self, dst, device) -> torch.Tensor:
+        """``[B, N]`` bool: the *other* members of each gold's vector group.
+
+        The gold's own column is left unmasked (masking it would make the
+        cross entropy -inf), and a group of one contributes nothing.
+        """
+        if self._dup_gid is None:
+            return torch.zeros(
+                (dst.shape[0], self.num_nodes), dtype=torch.bool,
+                device=device
+            )
+        g = self._dup_gid.to(device)
+        tg = g[dst]
+        same = g.unsqueeze(0) == tg.unsqueeze(1)
+        same[torch.arange(dst.shape[0], device=device), dst] = False
+        return same
+
     def _sample_absent_relations(self, src, rel, tries: int = 8):
         """Batch rows whose sampled relation is *absent* from that node.
 
@@ -1630,6 +1693,13 @@ class WiazkaTrainer:
                 src[:n_pull], rel[:n_pull], dst[:n_pull], device
             )
             mask_pull[torch.arange(n_pull, device=device), src[:n_pull]] = True
+            if self._dup_gid is not None:
+                # a gold's bit-identical twins are the *same answer* in the
+                # raw index: unmasked they cap the term at log(group size)
+                # and the target can never win the softmax (see the config)
+                mask_pull = mask_pull | self._duplicate_columns(
+                    dst[:n_pull], device
+                )
             l_pull = self.pull_contrast_loss(
                 q_pull,
                 self.model.node_emb_fixed,

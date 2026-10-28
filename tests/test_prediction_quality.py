@@ -1439,3 +1439,89 @@ def test_trainer_builds_the_order_teacher_from_the_graph():
     assert any(row[3] == 0 for row in taught._order_rows)
     rows = taught.quad_sampler.sample_order_batch(16)
     assert rows.shape[1] == 4
+
+
+# ------------------------------------------------------- duplicate vectors
+def _twin_graph(seed=0, n_nodes=24, n_rels=3, base_dim=16):
+    """Toy graph in which several nodes share their vector bit for bit.
+
+    A real retriever index does this: the Slowosiec export has 52.1 % of its
+    182 960 nodes bit-identical to at least one other node (largest group 27).
+    """
+    rng = random.Random(seed)
+    base = {i: torch.randn(base_dim) for i in range(n_nodes)}
+    base[5] = base[1].clone()
+    base[6] = base[1].clone()
+    base[13] = base[9].clone()
+    rel2idx = {f"r{i}": i for i in range(n_rels)}
+    edges = []
+    for i in range(n_nodes):
+        for k in range(3):
+            j = rng.randrange(n_nodes)
+            if j != i:
+                edges.append((i, j, f"r{k % n_rels}"))
+    return base, rel2idx, edges
+
+
+def _twin_trainer(duplicate_mask: bool, **kw):
+    node2emb, rel2idx, edges = _twin_graph()
+    cfg = WiazkaConfig(
+        op_dim=8, num_generators=4, gat_num_layers=1, gat_heads=2,
+        batch_size=16, epochs=1, device="cpu",
+        duplicate_mask=duplicate_mask, **kw
+    )
+    return WiazkaTrainer(node2emb, rel2idx, edges, cfg)
+
+
+def test_duplicate_groups_merge_only_bitwise_twins():
+    trainer = _twin_trainer(True)
+    gid = trainer._dup_gid
+    assert gid is not None and gid.shape == (trainer.num_nodes,)
+    # the three copies of one vector and the pair of another
+    assert len({int(gid[1]), int(gid[5]), int(gid[6])}) == 1
+    assert int(gid[9]) == int(gid[13])
+    assert int(gid[1]) != int(gid[9])
+    # everything else keeps its own group
+    sizes = torch.bincount(gid)
+    assert int(sizes.max()) == 3
+    assert int((sizes == 1).sum()) == trainer.num_nodes - 5
+    # ``False`` is the historical behaviour: no groups at all
+    assert _twin_trainer(False)._dup_gid is None
+
+
+def test_duplicate_mask_hides_the_twin_but_never_the_gold():
+    trainer = _twin_trainer(True)
+    dst = torch.tensor([1, 9, 2])
+    same = trainer._duplicate_columns(dst, "cpu")
+    assert same.shape == (3, trainer.num_nodes)
+    assert same[0, 5].item() and same[0, 6].item()
+    assert same[1, 13].item()
+    # the gold column and every unrelated column stay visible; masking the
+    # gold would make the cross entropy -inf
+    assert not same[0, 1].item() and not same[1, 9].item()
+    assert not same[2].any()
+
+
+def test_duplicate_mask_removes_the_cross_entropy_floor():
+    """A gold cannot beat its own twin, so the term has a floor without it.
+
+    ``log(group size)`` is the loss a *perfect* query still pays when the
+    answer is duplicated in the index: the twins score exactly as well as the
+    gold, so no amount of training can rank it first.
+    """
+    from relgat_projector.core.loss import ContrastLoss
+
+    trainer = _twin_trainer(True)
+    index = trainer.node_emb
+    query = index[[1]]          # the query already *is* the answer
+    gold = torch.tensor([1])
+    criterion = ContrastLoss(temperature=0.05)
+
+    floor = criterion(query, index, gold).item()
+    assert floor >= float(torch.log(torch.tensor(3.0))) - 1e-3
+
+    masked = criterion(
+        query, index, gold,
+        mask=trainer._duplicate_columns(gold, "cpu"),
+    ).item()
+    assert masked < 1e-3, "masking the group must let the gold win"
