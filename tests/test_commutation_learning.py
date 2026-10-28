@@ -139,9 +139,9 @@ def _order_rates(cayley, num_rel, seed=0):
 def _train_from_rates(rates, num_rel, steps=400, seed=0):
     loss = CurvatureLoss(num_rel)
     opt = torch.optim.Adam(loss.parameters(), lr=5e-2)
-    targets = list(rates.items())
+    order_rates = list(rates.items())
     for _ in range(steps):
-        obj = loss.supervision_soft(targets)
+        obj = loss.from_order_rates(order_rates)
         opt.zero_grad(set_to_none=True)
         obj.backward()
         opt.step()
@@ -161,10 +161,58 @@ def test_order_rate_is_one_for_the_dihedral_generators():
 
 
 def test_order_supervision_puts_c_the_right_way_round():
+    # ``C = 1`` means COMMUTES (see CurvatureLoss.forward): the abelian grid
+    # must come out high and the non-abelian dihedral pair low.  Passing the
+    # order rate to ``supervision_soft`` un-complemented reverses both, which
+    # is the inversion this test exists to catch.
     grid = _train_from_rates(_order_rates(_grid_cayley(4), 2), 2)
-    assert grid[0, 1].item() < 0.2, grid
+    assert grid[0, 1].item() > 0.8, grid
     dihedral = _train_from_rates(_order_rates(_dihedral_cayley(4), 2), 2)
-    assert dihedral[0, 1].item() > 0.8, dihedral
+    assert dihedral[0, 1].item() < 0.2, dihedral
+
+
+def _loss_at_c(c_value, **kw):
+    """A ``CurvatureLoss`` whose symmetrised ``C`` sits at ``c_value``."""
+    loss = CurvatureLoss(2, comm_weight=1.0, anti_weight=1.0, margin=0.05, **kw)
+    logit = float(torch.log(torch.tensor(c_value / (1.0 - c_value))))
+    with torch.no_grad():
+        loss.comm_logit.fill_(logit)
+    return loss
+
+
+def _pull_toward_closing(loss, gap_l2):
+    """d(loss)/d(direction) at that gap: >0 means the loss wants it closed."""
+    # routes differ by a vector whose chart gap is ``gap_l2``; the other route
+    # is the origin, so scaling ``scale`` scales the gap monotonically
+    scale = float(gap_l2 * loss.l2_scale)
+    t = torch.full((1, 4), scale / 2.0, requires_grad=True)
+    zero = torch.zeros(1, 4)
+    r, s = torch.tensor([0]), torch.tensor([1])
+    out = loss(zero, zero, r, s, t, zero)
+    grad, = torch.autograd.grad(out, t)
+    # positive projection on the separating direction == closing reduces loss
+    return float((grad * t).sum())
+
+
+def test_commuting_c_is_the_value_the_gate_asks_to_close():
+    """The trained ``C`` has to agree with how ``forward`` gates the gap.
+
+    ``forward`` penalises ``comm_weight * c_rs * gap`` and caps the rest with
+    an anti hinge, so ``C = 1`` is by construction "pull these routes
+    together": the gradient that closes the gap has to be strong when ``C`` is
+    high and nearly gone when ``C`` is low.  Supervising ``C`` with the raw
+    order rate (un-complemented) inverts which pairs get closed, and this test
+    pins the convention end to end.
+    """
+    # below the anti margin, so the hinge is silent and only C moves anything
+    pull_high_c = _pull_toward_closing(_loss_at_c(0.95), gap_l2=0.01)
+    pull_low_c = _pull_toward_closing(_loss_at_c(0.05), gap_l2=0.01)
+    assert pull_high_c > 0.0, pull_high_c
+    assert pull_high_c > 10.0 * pull_low_c, (pull_high_c, pull_low_c)
+
+    # and the supervision lands on the commuting end of that convention
+    grid = _train_from_rates(_order_rates(_grid_cayley(4), 2), 2)
+    assert grid[0, 1].item() > 0.8, grid
 
 
 def test_order_supervision_keeps_the_matrix_symmetric():

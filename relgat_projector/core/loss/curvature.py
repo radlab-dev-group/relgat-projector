@@ -264,15 +264,21 @@ class CurvatureLoss(nn.Module):
         targets: list,
         weight: float = 1.0,
     ) -> torch.Tensor:
-        """Supervise ``C_rs`` with a *probability* per pair.
+        """Fit ``C_rs`` to a probability per pair, on the convention below.
 
-        ``targets`` is a list of ``((r, s), p)`` where ``p`` is the measured
-        fraction of graph evidence calling the pair order-dependent, i.e. the
-        target for ``C = P(non-commuting)``.  Unlike :meth:`supervision` this
-        teacher is the same graph evidence the order term uses to *move* the
-        operator, so the matrix the 12b diagnostic reads describes the
-        transport it is read on, instead of a witness-frequency proxy.
+        **Convention: ``C = 1`` means the pair COMMUTES.**  The convention is
+        set by :meth:`forward`, where ``comm_part = comm_weight * c_rs * gap``
+        penalises a route gap *where C is high* (the routes must agree) and
+        ``anti_part = anti_weight * (1 - c_rs) * (gap - margin)`` demands a gap
+        *where C is low* (the routes must differ);
+        :meth:`ShadowLoss.commute_gated` does the same off the graph, and
+        :meth:`supervision` labels the witnessed-commuting pairs ``1.0``.  So
+        ``targets`` has to carry a probability of **commuting**: a
+        non-commutativity score must be complemented first -- use
+        :meth:`from_order_rates` rather than passing one here, or the gate
+        closes on exactly the pairs that have to stay open.
 
+        ``targets`` is a list of ``((r, s), p)`` with ``p`` in ``[0, 1]``.
         Pairs are averaged over cells (both ``(r, s)`` and ``(s, r)``) exactly
         as in :meth:`supervision`, so the symmetric matrix stays symmetric and
         each pair contributes once.
@@ -290,6 +296,29 @@ class CurvatureLoss(nn.Module):
         logits = 0.5 * (self.comm_logit[rows, cols] + self.comm_logit[cols, rows])
         target = torch.tensor(probs, dtype=torch.float, device=dev)
         return weight * nn.functional.binary_cross_entropy_with_logits(logits, target)
+
+    def from_order_rates(self, order_rates: list, weight: float = 1.0) -> torch.Tensor:
+        """Supervise ``C_rs`` from graph order-dependence rates.
+
+        ``order_rates`` is a list of ``((r, s), rate)`` as returned by
+        :meth:`QuadrupleSampler.order_pair_rates`, where ``rate`` is the
+        fraction of base points at which the two composed orders ``r.s`` and
+        ``s.r`` reach *different* neighbourhoods -- a probability of **not**
+        commuting, so it is complemented here, in the one place that knows how
+        :meth:`forward` reads ``C``.
+
+        Teaching ``C`` from this rate instead of from the witness table is what
+        makes the matrix describe the transport it is read on.  The witness
+        count tracks relation *frequency*: measured on this graph, the relation
+        holding 49.7 % of the edges is witnessed on most of its pairs, driving
+        ``C -> 0.93`` on exactly the pairs the operator separates most
+        (``spearman(C, order_rate) = -0.29``, 26.7 % agreement with the graph's
+        verdict over the 45 pairs that carry evidence).
+        """
+        return self.supervision_soft(
+            [(pair, 1.0 - float(rate)) for pair, rate in order_rates],
+            weight=weight,
+        )
 
     def symmetrize_logits(self) -> None:
         """Make the parameter itself symmetric (idempotent, in-place)."""

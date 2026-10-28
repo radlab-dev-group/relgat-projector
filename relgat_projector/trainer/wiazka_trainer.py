@@ -217,8 +217,9 @@ class WiazkaConfig:
     #: edges) is witnessed on most pairs, so ``C -> 0.93`` lands on exactly the
     #: pairs the operator separates most: measured ``spearman(C, order) =
     #: -0.29`` and agreement with the graph's verdict on only 26.7 % of pairs.
-    #: Here ``C_rs`` is trained as ``P(order-dependent)`` from the per-pair
-    #: order rate, so the matrix the 12b diagnostic reads describes the
+    #: Here ``C_rs`` is fitted to the per-pair order rate, complemented because
+    #: ``C = 1`` means *commutes* everywhere in the code (``CurvatureLoss.from_order_rates``
+    #: owns that sign), so the matrix the 12b diagnostic reads describes the
     #: transport it is read on.  ``False`` keeps the historical witness
     #: supervision.
     commutation_from_order: bool = False
@@ -823,8 +824,8 @@ class WiazkaTrainer:
                              / max(1, len(self._comm_targets)))
                 print(
                     f"[curvature] C_rs <- order teacher: {len(self._comm_targets)} "
-                    f"pair(s) supervised as P(order-dependent) "
-                    f"({n_mixed} mixed, mean rate {mean_rate:.3f}), "
+                    f"pair(s) supervised as P(commuting) = 1 - order rate "
+                    f"({n_mixed} mixed, mean order rate {mean_rate:.3f}), "
                     f"weight={self.cfg.commutation_weight:.3f} "
                     f"(instead of the witness table)"
                 )
@@ -1558,18 +1559,20 @@ class WiazkaTrainer:
 
         if self.stage_manager.is_active("L_commut"):
             if self.cfg.commutation_from_order:
-                # ``C_rs`` as ``P(order-dependent)``, taught from the same graph
-                # evidence the order term uses to move the operator.  The
-                # witness teacher below counts base points where two routes
-                # meet, which on this graph tracks relation *frequency*: the
-                # measured result was ``spearman(C, order_rate) = -0.29`` and
-                # agreement with the graph's verdict on 26.7 % of pairs, i.e.
-                # the matrix 12b reads described something other than the
-                # transport it is read on.  Every scored pair enters each step,
-                # so the term is a full-batch least-squares fit of C to the
-                # rate rather than a sampled contrast.
+                # ``C_rs`` taught from the same graph evidence the order term
+                # uses to move the operator.  The witness teacher below counts
+                # base points where two routes meet, which on this graph tracks
+                # relation *frequency*: the measured result was
+                # ``spearman(C, order_rate) = -0.29`` and agreement with the
+                # graph's verdict on 26.7 % of pairs, i.e. the matrix 12b reads
+                # described something other than the transport it is read on.
+                # ``from_order_rates`` owns the sign (``C = 1`` means commutes,
+                # which is what ``forward`` gates on), so the rate enters
+                # complemented.  Every scored pair enters each step, so the
+                # term is a full-batch fit of C to the rate rather than a
+                # sampled contrast.
                 if self._comm_targets:
-                    l_comm = self.curvature_loss.supervision_soft(
+                    l_comm = self.curvature_loss.from_order_rates(
                         self._comm_targets,
                         weight=float(self.cfg.commutation_weight),
                     )

@@ -132,10 +132,13 @@ def main() -> None:
         print(f"\n--- on the {len(have)} pairs with order evidence ---")
         print(f"spearman(sep, C)        = {spearman(sep, c):+.4f}")
         print(f"spearman(sep, order_rate)= {spearman(sep, rate):+.4f}")
-        print(f"spearman(C, order_rate) = {spearman(c, rate):+.4f}   <-- C tracks the graph?")
-        agree = float(np.mean((c > 0.5) == (rate > 0.5)))
+        # ``C = 1`` means COMMUTES (the convention ``CurvatureLoss.forward``
+        # gates on), so a C that tracks the graph is ANTI-correlated with the
+        # order rate: high C where the two orders agree, low C where they do not
+        print(f"spearman(C, order_rate) = {spearman(c, rate):+.4f}   <-- want NEGATIVE")
+        agree = float(np.mean((c > 0.5) == (rate < 0.5)))
         print(f"agreement of C with the order verdict: {agree:.1%}")
-        inverted = [r for r in have if (r["C"] > 0.5) != (r["order_rate"] > 0.5)]
+        inverted = [r for r in have if (r["C"] > 0.5) != (r["order_rate"] < 0.5)]
         print(f"inverted pairs: {len(inverted)} / {len(have)}")
         for r in sorted(inverted, key=lambda r: -r["sep"])[:args.top]:
             print(f"  {r['pair']:<50} C={r['C']:.2f} order_rate={r['order_rate']:.2f} "

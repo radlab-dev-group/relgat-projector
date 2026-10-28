@@ -282,17 +282,21 @@ class QuadrupleSampler:
     def order_pair_rates(
         self, min_support: int = 3
     ) -> List[Tuple[Tuple[int, int], float]]:
-        """``((r, s), rate)`` for every scanned pair: ``C_rs`` as ``P(order-dependent)``.
+        """``((r, s), rate)`` per scanned pair: ``P(the order of r, s matters)``.
 
         The rate is the fraction of base points at which the two composed
         orders reach different neighbourhoods, over ALL base points where both
         orders exist -- a per-pair probability, not the decisive-only subset
-        :meth:`order_dependence_examples` keeps for the hinges.  Supervising
-        ``C`` with it makes the matrix the 12b diagnostic reads describe the
-        same graph fact the order teacher moves the operator with, instead of
-        the witness-count proxy (which is a relation-frequency proxy: the most
-        frequent relation was witnessed -- and therefore ``C -> 0.93`` -- on
-        most pairs, inverted against the operator).
+        :meth:`order_dependence_examples` keeps for the hinges.
+
+        Note the sign for ``C_rs``: this is a probability of **not** commuting,
+        while ``C = 1`` means commutes everywhere in the code (see
+        ``CurvatureLoss.from_order_rates``), so the rate enters ``C``
+        complemented.  Supervising ``C`` from it -- instead of the witness
+        count, which is a relation-frequency proxy (the most frequent relation
+        is witnessed on most of its pairs, so the old matrix read ``0.93`` on
+        exactly the pairs the operator separates most) -- is what makes the
+        matrix the 12b diagnostic reads describe the transport it is read on.
 
         ``min_support`` drops pairs whose rate rests on too few examples to
         mean anything.
