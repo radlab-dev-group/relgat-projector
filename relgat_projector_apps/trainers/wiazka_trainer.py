@@ -180,6 +180,21 @@ def get_args() -> argparse.Namespace:
                         help="base points needed before a pair counts")
     parser.add_argument("--order-min-fraction", type=float, default=0.5,
                         help="fraction of those base points that must disagree")
+    parser.add_argument("--commutation-from-order", action="store_true",
+                        help="teach C_rs as P(order-dependent) from the order-"
+                             "dependence teacher instead of the witness table. "
+                             "The witness table counts base points where two "
+                             "routes meet, which tracks relation FREQUENCY: on "
+                             "this graph synonimia (49.7%% of edges) is "
+                             "witnessed on most pairs, so C -> 0.93 landed on "
+                             "exactly the pairs the operator separates most "
+                             "(spearman(C, order_rate) = -0.29, agreement with "
+                             "the graph verdict on 26.7%% of pairs). The order "
+                             "rate is the same evidence the operator is shaped "
+                             "with, so C describes the transport 12b reads it on")
+    parser.add_argument("--commutation-weight", type=float, default=1.0,
+                        help="weight of the order-supervised C_rs term "
+                             "(only with --commutation-from-order)")
     parser.add_argument("--balance-power", type=float, default=0.5,
                         help="temper of relation-balanced sampling: relation p "
                              "proportional to count**power "
@@ -347,6 +362,8 @@ def main() -> None:
         order_jaccard=args.order_jaccard,
         order_min_support=args.order_min_support,
         order_min_fraction=args.order_min_fraction,
+        commutation_from_order=args.commutation_from_order,
+        commutation_weight=args.commutation_weight,
         balance_power=args.balance_power,
         decoder_balance=args.decoder_balance,
         decoder_label_smoothing=args.decoder_label_smoothing,

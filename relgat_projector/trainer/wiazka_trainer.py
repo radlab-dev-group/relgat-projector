@@ -210,6 +210,21 @@ class WiazkaConfig:
     #: route difference divided by the chart unit, so ~``sqrt(2(1-cos))`` for
     #: unit-length vectors -- 0.05 is ~8 deg, 0.10 ~16 deg)
     order_margin: float = 0.0
+    #: supervise ``C_rs`` from the *order-dependence* teacher (the same graph
+    #: evidence that moves the operator) instead of the witness table.  The
+    #: witness teacher counts base points where the two routes meet, which is a
+    #: proxy for relation *frequency* -- on this graph ``synonimia`` (49.7 % of
+    #: edges) is witnessed on most pairs, so ``C -> 0.93`` lands on exactly the
+    #: pairs the operator separates most: measured ``spearman(C, order) =
+    #: -0.29`` and agreement with the graph's verdict on only 26.7 % of pairs.
+    #: Here ``C_rs`` is trained as ``P(order-dependent)`` from the per-pair
+    #: order rate, so the matrix the 12b diagnostic reads describes the
+    #: transport it is read on.  ``False`` keeps the historical witness
+    #: supervision.
+    commutation_from_order: bool = False
+    #: weight of the order-supervised ``L_commut`` term (``False`` above keeps
+    #: the historical unit weight)
+    commutation_weight: float = 1.0
     #: gate the ``L_curv`` holonomy term to *genuine commutation squares*
     #: (the diamond's closing edges are the two opening ones, ``q == p`` and
     #: ``s == r``).  Measured on this graph, only **6.1 %** of the sampled
@@ -768,8 +783,12 @@ class WiazkaTrainer:
         # (and no invented non-commutativity either)
         self._order_pairs: List[Tuple[int, int]] = []
         self._order_rows: List[Tuple[int, int, int, int]] = []
-        if (self.cfg.order_weight > 0 or self.cfg.order_join_weight > 0) \
-                and self.cfg.order_margin >= 0:
+        #: ``((r, s), rate)`` supervision of ``C_rs`` (see
+        #: ``WiazkaConfig.commutation_from_order``); empty unless enabled
+        self._comm_targets: List[Tuple[Tuple[int, int], float]] = []
+        if ((self.cfg.order_weight > 0 or self.cfg.order_join_weight > 0
+             or self.cfg.commutation_from_order)
+                and self.cfg.order_margin >= 0):
             self._order_pairs, self._order_rows = (
                 self.quad_sampler.order_dependence_examples(
                     scan_nodes=self.cfg.order_scan_nodes,
@@ -780,18 +799,35 @@ class WiazkaTrainer:
             )
             n_dep = sum(1 for row in self._order_rows if row[3] == 1)
             names = {v: k for k, v in self.rel2idx.items()}
-            print(
-                f"[curvature] order teacher: {len(self._order_rows)} labelled "
-                f"example(s) over {len(self._order_pairs)} pair(s) "
-                f"({n_dep} order-dependent / "
-                f"{len(self._order_rows) - n_dep} commutative), "
-                f"margin={self.cfg.order_margin:.4f} "
-                f"sep_w={self.cfg.order_weight:.3f} "
-                f"join_w={self.cfg.order_join_weight:.3f}"
-            )
-            for pair in self._order_pairs:
-                print("    " + " x ".join(
-                    names.get(r, str(r)) for r in pair))
+            if self.cfg.order_weight > 0 or self.cfg.order_join_weight > 0:
+                print(
+                    f"[curvature] order teacher: {len(self._order_rows)} labelled "
+                    f"example(s) over {len(self._order_pairs)} pair(s) "
+                    f"({n_dep} order-dependent / "
+                    f"{len(self._order_rows) - n_dep} commutative), "
+                    f"margin={self.cfg.order_margin:.4f} "
+                    f"sep_w={self.cfg.order_weight:.3f} "
+                    f"join_w={self.cfg.order_join_weight:.3f}"
+                )
+                for pair in self._order_pairs:
+                    print("    " + " x ".join(
+                        names.get(r, str(r)) for r in pair))
+            if self.cfg.commutation_from_order:
+                # the SAME scan, but every scored pair and its rate, mixed ones
+                # included -- see ``QuadrupleSampler.order_pair_rates``
+                self._comm_targets = self.quad_sampler.order_pair_rates(
+                    min_support=self.cfg.order_min_support)
+                n_mixed = sum(1 for _, rate in self._comm_targets
+                              if 0.0 < rate < 1.0)
+                mean_rate = (sum(rate for _, rate in self._comm_targets)
+                             / max(1, len(self._comm_targets)))
+                print(
+                    f"[curvature] C_rs <- order teacher: {len(self._comm_targets)} "
+                    f"pair(s) supervised as P(order-dependent) "
+                    f"({n_mixed} mixed, mean rate {mean_rate:.3f}), "
+                    f"weight={self.cfg.commutation_weight:.3f} "
+                    f"(instead of the witness table)"
+                )
         # the resolved geometry, not the raw config: with ``geometry_auto`` the
         # numbers below are the configured ones scaled to this base space
         self.contrast_loss = ContrastLoss(self.geometry["contrast_temperature"])
@@ -1521,17 +1557,36 @@ class WiazkaTrainer:
                 log["L_order_join"] = float(taught["join"].item())
 
         if self.stage_manager.is_active("L_commut"):
-            # the commutation matrix C_rs is taught exclusively from the
-            # graph: relation pairs whose two routes meet (positives) vs pairs
-            # with no witness (negatives), drawn from the EXHAUSTIVE witness
-            # table and balanced per step.
-            pos_pairs, neg_pairs = self.quad_sampler.sample_relation_pairs(
-                batch_size=16, max_neg=16
-            )
-            if pos_pairs or neg_pairs:
-                l_comm = self.curvature_loss.supervision(pos_pairs, neg_pairs)
-                loss = loss + l_comm
-                log["L_commut"] = float(l_comm.item())
+            if self.cfg.commutation_from_order:
+                # ``C_rs`` as ``P(order-dependent)``, taught from the same graph
+                # evidence the order term uses to move the operator.  The
+                # witness teacher below counts base points where two routes
+                # meet, which on this graph tracks relation *frequency*: the
+                # measured result was ``spearman(C, order_rate) = -0.29`` and
+                # agreement with the graph's verdict on 26.7 % of pairs, i.e.
+                # the matrix 12b reads described something other than the
+                # transport it is read on.  Every scored pair enters each step,
+                # so the term is a full-batch least-squares fit of C to the
+                # rate rather than a sampled contrast.
+                if self._comm_targets:
+                    l_comm = self.curvature_loss.supervision_soft(
+                        self._comm_targets,
+                        weight=float(self.cfg.commutation_weight),
+                    )
+                    loss = loss + l_comm
+                    log["L_commut"] = float(l_comm.item())
+            else:
+                # the commutation matrix C_rs is taught exclusively from the
+                # graph: relation pairs whose two routes meet (positives) vs
+                # pairs with no witness (negatives), drawn from the EXHAUSTIVE
+                # witness table and balanced per step.
+                pos_pairs, neg_pairs = self.quad_sampler.sample_relation_pairs(
+                    batch_size=16, max_neg=16
+                )
+                if pos_pairs or neg_pairs:
+                    l_comm = self.curvature_loss.supervision(pos_pairs, neg_pairs)
+                    loss = loss + l_comm
+                    log["L_commut"] = float(l_comm.item())
 
         if self.stage_manager.is_active("L_shadow"):
             # cycle + commutation consistency OFF the graph (PLAN.md 2.6)

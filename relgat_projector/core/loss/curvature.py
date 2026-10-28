@@ -259,6 +259,38 @@ class CurvatureLoss(nn.Module):
         # terms keeps them equally weighted whatever their sizes are
         return weight * torch.stack(parts).mean()
 
+    def supervision_soft(
+        self,
+        targets: list,
+        weight: float = 1.0,
+    ) -> torch.Tensor:
+        """Supervise ``C_rs`` with a *probability* per pair.
+
+        ``targets`` is a list of ``((r, s), p)`` where ``p`` is the measured
+        fraction of graph evidence calling the pair order-dependent, i.e. the
+        target for ``C = P(non-commuting)``.  Unlike :meth:`supervision` this
+        teacher is the same graph evidence the order term uses to *move* the
+        operator, so the matrix the 12b diagnostic reads describes the
+        transport it is read on, instead of a witness-frequency proxy.
+
+        Pairs are averaged over cells (both ``(r, s)`` and ``(s, r)``) exactly
+        as in :meth:`supervision`, so the symmetric matrix stays symmetric and
+        each pair contributes once.
+        """
+        if not targets:
+            return self.comm_logit.new_zeros(())
+        dev = self.comm_logit.device
+        cells_rc = []
+        probs = []
+        for (r, s), p in targets:
+            cells_rc.append((r, s))
+            probs.append(float(p))
+        rows = torch.tensor([i[0] for i in cells_rc], dtype=torch.long, device=dev)
+        cols = torch.tensor([i[1] for i in cells_rc], dtype=torch.long, device=dev)
+        logits = 0.5 * (self.comm_logit[rows, cols] + self.comm_logit[cols, rows])
+        target = torch.tensor(probs, dtype=torch.float, device=dev)
+        return weight * nn.functional.binary_cross_entropy_with_logits(logits, target)
+
     def symmetrize_logits(self) -> None:
         """Make the parameter itself symmetric (idempotent, in-place)."""
         with torch.no_grad():

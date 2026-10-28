@@ -83,6 +83,14 @@ class QuadrupleSampler:
         #: :meth:`order_dependence_examples` (``None`` = not scanned yet)
         self._order_pairs: Optional[List[Tuple[int, int]]] = None
         self._order_rows: Optional[List[Tuple[int, int, int, int]]] = None
+        #: ``(r, s) -> (n_examples, order_dependent_rate)`` for EVERY pair the
+        #: scan saw, before the decisiveness filter of
+        #: :meth:`order_dependence_examples` drops the mixed ones; filled by
+        #: that method, ``None`` = not scanned yet.  ``C_rs`` is trained on the
+        #: *rate* (a probability), which is what makes a soft, unbiased
+        #: supervision possible: the filter above must drop a mixed pair
+        #: because a hinge cannot express "sometimes", but a probability can.
+        self._order_rates: Optional[Dict[Tuple[int, int], Tuple[int, float]]] = None
 
     # ------------------------------------------------------------ compilation
     def _find_at(self, a: int) -> Optional[Diamond]:
@@ -253,7 +261,9 @@ class QuadrupleSampler:
         pairs: List[Tuple[int, int]] = []
         kept: List[Tuple[int, int, int]] = []
         frac = float(min_fraction)
+        rates: Dict[Tuple[int, int], Tuple[int, float]] = {}
         for key, n in sorted(support.items()):
+            rates[key] = (int(n), disagree[key] / n)
             if n < int(min_support):
                 continue
             rate = disagree[key] / n
@@ -266,7 +276,36 @@ class QuadrupleSampler:
                 kept.append((a, key[0], key[1], label))
         self._order_pairs = pairs
         self._order_rows = kept
+        self._order_rates = rates
         return list(pairs), list(kept)
+
+    def order_pair_rates(
+        self, min_support: int = 3
+    ) -> List[Tuple[Tuple[int, int], float]]:
+        """``((r, s), rate)`` for every scanned pair: ``C_rs`` as ``P(order-dependent)``.
+
+        The rate is the fraction of base points at which the two composed
+        orders reach different neighbourhoods, over ALL base points where both
+        orders exist -- a per-pair probability, not the decisive-only subset
+        :meth:`order_dependence_examples` keeps for the hinges.  Supervising
+        ``C`` with it makes the matrix the 12b diagnostic reads describe the
+        same graph fact the order teacher moves the operator with, instead of
+        the witness-count proxy (which is a relation-frequency proxy: the most
+        frequent relation was witnessed -- and therefore ``C -> 0.93`` -- on
+        most pairs, inverted against the operator).
+
+        ``min_support`` drops pairs whose rate rests on too few examples to
+        mean anything.
+        """
+        if self._order_rates is None:
+            self.order_dependence_examples()
+        assert self._order_rates is not None
+        out = [
+            (pair, rate)
+            for pair, (n, rate) in sorted(self._order_rates.items())
+            if n >= int(min_support)
+        ]
+        return out
 
     def sample_order_batch(
         self, batch_size: int, device=None

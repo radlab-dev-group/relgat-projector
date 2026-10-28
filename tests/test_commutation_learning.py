@@ -117,3 +117,70 @@ def test_commutation_is_symmetric():
     torch.nn.init.normal_(loss.comm_logit, 0.0, 1.0)
     c = loss.commutation()
     assert torch.allclose(c, c.t(), atol=1e-6)
+
+
+# ---------------------------------------------------------------- order teacher
+# ``C_rs`` is what the 12b diagnostic reads, so it has to describe the same
+# graph fact the operator is shaped with.  The witness table does not: it
+# counts base points where two routes meet, which on a real ontology tracks
+# relation frequency.  These two Cayley graphs are the ground truth for the
+# *order* question -- ``Z^2`` commutes, ``D4`` does not -- and order-rate
+# supervision must put ``C`` the right way round on both.
+
+
+def _order_rates(cayley, num_rel, seed=0):
+    """``{(r, s): order_dependent_rate}`` of a Cayley graph from ``_cayley``."""
+    out_adj, in_adj, n = cayley
+    quad = QuadrupleSampler(out_adj, in_adj, num_nodes=n,
+                            num_rel=num_rel, rng=random.Random(seed + 1))
+    return dict(quad.order_pair_rates(min_support=3))
+
+
+def _train_from_rates(rates, num_rel, steps=400, seed=0):
+    loss = CurvatureLoss(num_rel)
+    opt = torch.optim.Adam(loss.parameters(), lr=5e-2)
+    targets = list(rates.items())
+    for _ in range(steps):
+        obj = loss.supervision_soft(targets)
+        opt.zero_grad(set_to_none=True)
+        obj.backward()
+        opt.step()
+    return loss.commutation().detach()
+
+
+def test_order_rate_is_zero_for_the_abelian_grid():
+    rates = _order_rates(_grid_cayley(4), 2)
+    # r.s and s.r reach the same successor at every node of Z^2
+    assert rates[(0, 1)] == pytest.approx(0.0), rates
+
+
+def test_order_rate_is_one_for_the_dihedral_generators():
+    rates = _order_rates(_dihedral_cayley(4), 2)
+    # the two orders land on different reflections everywhere
+    assert rates[(0, 1)] == pytest.approx(1.0), rates
+
+
+def test_order_supervision_puts_c_the_right_way_round():
+    grid = _train_from_rates(_order_rates(_grid_cayley(4), 2), 2)
+    assert grid[0, 1].item() < 0.2, grid
+    dihedral = _train_from_rates(_order_rates(_dihedral_cayley(4), 2), 2)
+    assert dihedral[0, 1].item() > 0.8, dihedral
+
+
+def test_order_supervision_keeps_the_matrix_symmetric():
+    c = _train_from_rates(_order_rates(_dihedral_cayley(4), 2), 2)
+    assert torch.allclose(c, c.t(), atol=1e-6)
+
+
+def test_order_supervision_drops_pairs_below_min_support():
+    out, inn, n = _grid_cayley(4)
+    quad = QuadrupleSampler(out, inn, num_nodes=n, num_rel=2,
+                            rng=random.Random(1))
+    # 16 base points support the only pair; asking for more leaves nothing
+    assert quad.order_pair_rates(min_support=n + 1) == []
+    assert len(quad.order_pair_rates(min_support=3)) == 1
+
+
+def test_order_supervision_on_empty_targets_is_zero():
+    loss = CurvatureLoss(3)
+    assert float(loss.supervision_soft([]).item()) == 0.0
