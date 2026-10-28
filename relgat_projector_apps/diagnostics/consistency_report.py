@@ -311,6 +311,16 @@ def print_report(results: Dict) -> None:
                   f"({value['c_low']} low, {value['c_high']} high)")
             print(f"spearman(sep, C) = {value['corr_sep_c']:.4f}   "
                   f"spearman(sep, 1-C) = {value['corr_sep_1mc']:.4f}")
+            print(f"AUC(1-C -> the two routes separate) = {value['auc_c_noncommuting']:.4f}"
+                  "   (1.0 = C ranks the non-commuting pairs first)")
+            print("  desired: C_rs = 1 means the graph proves the pair COMMUTES,")
+            print("  so the two composed routes must AGREE -- good is")
+            print("  spearman(sep, C) < 0, spearman(sep, 1-C) > 0, AUC -> 1.")
+            print(f"  measured: sep where C says COMMUTES = {value['sep_c_high']:.3f}"
+                  f"  vs  C says NON-COMMUTING = {value['sep_c_low']:.3f}"
+                  + ("  (inverted: the matrix and the operator disagree)"
+                     if value['sep_c_high'] > value['sep_c_low']
+                     else "  (direction OK: non-commuting pairs separate more)"))
             for name, rows in (("most order-dependent", value["strongest"]),
                                ("least order-dependent", value["weakest"])):
                 print(f"  {name}: " + "; ".join(

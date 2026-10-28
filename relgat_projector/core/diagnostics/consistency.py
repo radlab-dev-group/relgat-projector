@@ -361,6 +361,10 @@ class OrderSeparationReport:
     sep_max: float
     corr_sep_c: float                 # spearman(sep, C)
     corr_sep_1mc: float               # spearman(sep, 1 - C)
+    #: AUC of ``1 - C`` as a score for "the two routes separate": ``1`` means
+    #: C ranks the non-commuting pairs above the commuting ones, the desired
+    #: direction of 12b.  Sign-robust, unlike either Spearman.
+    auc_c_noncommuting: float
     n_c_evidence: int                 # pairs whose C left the 0.5 prior
     c_low: int                        # C below the "no evidence" band
     c_high: int                       # C above it
@@ -427,6 +431,11 @@ def order_separation(
         sep_max=float(s.max()),
         corr_sep_c=spearman(s, c),
         corr_sep_1mc=spearman(s, 1.0 - c),
+        # the positive class is "the two routes separate", read off the
+        # measured separation itself (upper half of its own distribution),
+        # so the AUC says how well C ranks the non-commuting pairs first
+        auc_c_noncommuting=roc_auc(
+            (s >= float(np.median(s))).astype(float), 1.0 - c),
         n_c_evidence=int((low | high).sum()),
         c_low=int(low.sum()),
         c_high=int(high.sum()),
