@@ -39,6 +39,8 @@ from relgat_projector.core.diagnostics import (
     AdditiveTransport,
     CheckpointTransport,
     Transport,
+    identity_error,
+    synthesize,
     document_scores,
     order_description_separation,
     order_separation,
@@ -235,6 +237,74 @@ def run_order(tasks: List[Dict], embed: Embedder, langs: Sequence[str],
     return out
 
 
+def _unit(x: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.normalize(x, p=2, dim=-1)
+
+
+# --------------------------------------------------------------- 12c synthesis
+#: the relation pair the synthesis benchmark is run on: goal along ``syn``,
+#: forbidden along ``ant`` -- "the synonym of X that is not Z"
+SYNTH_REL = ("synonimia", "antonimia właściwa")
+
+
+def run_synthesis(transport: Transport, goals: torch.Tensor,
+                  forbids: torch.Tensor, rel: str, forbid_rel: str,
+                  taus: Sequence[float] = (0.3, 0.5, 0.7)) -> Dict[str, float]:
+    """12c: relational constraint synthesis, ideas/11.
+
+    The gold is analytic, which is what makes the section useful: for a map
+    with ``T^T T = s^2 I`` the identity ``cos(T_r v, a) = cos(v, T_r^-1 a)``
+    holds **exactly**, so its measured violation is an error with a known
+    target of ``0.0`` and no annotation anywhere.  It is the premise the whole
+    closed-form reduction of idea 11 rests on, and before this section nothing
+    printed it.
+
+    Reported next to it: whether the constraint of the returned ``v*`` holds
+    when measured with the real operator, and how the closed form scores
+    against the vector subtraction ``a - b`` everybody ships.
+    """
+    n = min(int(goals.shape[0]), int(forbids.shape[0]))
+    rows: List[Dict[str, float]] = []
+    for tau in taus:
+        for k in range(n):
+            # one row at a time is what the transport accepts: [1, D]
+            goal = goals[k].float().unsqueeze(0)
+            forbid = forbids[k].float().unsqueeze(0)
+            sol = synthesize(transport, goal, forbid, rel, forbid_rel, tau)
+            v = sol["v"]
+            obj = float((_unit(transport.apply(v, rel))
+                         * _unit(transport.prepare(goal))).sum())
+            con = float((_unit(transport.apply(v, forbid_rel))
+                         * _unit(transport.prepare(forbid))).sum())
+            # the subtraction baseline has to be charted like everything else:
+            # it is a vector in the caller's space, not in the operator's
+            naive = _unit(transport.prepare(_unit(goal) - _unit(forbid)))
+            obj_naive = float((_unit(transport.apply(naive, rel))
+                               * _unit(transport.prepare(goal))).sum())
+            con_naive = float((_unit(transport.apply(naive, forbid_rel))
+                               * _unit(transport.prepare(forbid))).sum())
+            rows.append({"tau": float(tau), "objective": obj,
+                         "constraint": con, "satisfied": float(con <= tau),
+                         "objective_naive": obj_naive,
+                         "satisfied_naive": float(con_naive <= tau),
+                         "active": float(bool(sol["constraint_active"]))})
+    out: Dict[str, float] = {}
+    for tau in taus:
+        sel = [r for r in rows if r["tau"] == tau]
+        out[f"objective@{tau}"] = float(np.mean([r["objective"] for r in sel]))
+        out[f"objective_naive@{tau}"] = float(
+            np.mean([r["objective_naive"] for r in sel]))
+        out[f"satisfied@{tau}"] = float(np.mean([r["satisfied"] for r in sel]))
+        out[f"satisfied_naive@{tau}"] = float(
+            np.mean([r["satisfied_naive"] for r in sel]))
+        out[f"constraint_active@{tau}"] = float(
+            np.mean([r["active"] for r in sel]))
+    err = identity_error(transport, goals[:min(24, n)], rel)
+    out.update({f"{k}_rel": v for k, v in err.items()})
+    out["n_solutions"] = float(len(rows))
+    return out
+
+
 # --------------------------------------------------------------------- reporting
 #: label of the learned-operator 12a block inside results["lang"][lang]
 LEARNED = "12a_learned"
@@ -295,6 +365,32 @@ def _print_transport_comparison(lang: str, additive: Dict, learned: Dict) -> Non
     print(f"{'learned - baseline':<26}" + "".join(
         f"{delta[c]:>+10.3f}" if c in delta else f"{'-':>10}" for c in columns))
     print("  (AUC 0.5 = no signal; >0.5 = the metric rises on self-contradicting text)")
+
+
+def print_synthesis_report(results: Dict) -> None:
+    """12c: the closed-form synthesis of ideas/11 and the identity it assumes."""
+    block = results.get("12c") or {}
+    if not block:
+        return
+    print("\n=== 12c relational constraint synthesis [ideas/11] ===")
+    header = (f"{'variant':<22}{'identity_err':>14}{'p95':>8}"
+              f"{'obj .3/.5/.7':>22}{'sat .3/.5/.7':>18}"
+              f"{'naive obj':>11}{'naive sat':>11}")
+    print(header)
+    print("-" * (len(header) - 2))
+    for name, r in block.items():
+        def g(k):
+            return float(r.get(k, float("nan")))
+        objs = "/".join(f"{g(f'objective@{t}'):.2f}" for t in (0.3, 0.5, 0.7))
+        sats = "/".join(f"{g(f'satisfied@{t}'):.2f}" for t in (0.3, 0.5, 0.7))
+        print(f"{name:<22}{g('identity_error_mean_rel'):>14.4f}"
+              f"{g('identity_error_p95_rel'):>8.4f}{objs:>22}{sats:>18}"
+              f"{g('objective_naive@0.5'):>11.4f}{g('satisfied_naive@0.5'):>11.2f}")
+    print("  identity_err: gold is 0.0000 -- cos(T_r v,a) must equal "
+          "cos(v, T_r^-1 a) exactly for a similarity; every 0.001 is error the "
+          "closed form inherits.")
+    print("  obj = goal achieved, sat = constraint met, both measured with the "
+          "real operator; naive is the a-b subtraction everybody ships.")
 
 
 def print_report(results: Dict) -> None:
@@ -361,8 +457,10 @@ def get_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR)
     parser.add_argument("--embedder", default=DEFAULT_EMBEDDER)
     parser.add_argument("--langs", nargs="+", default=["pl", "en"], choices=["pl", "en"])
-    parser.add_argument("--section", nargs="+", default=["12a", "12b"],
-                        choices=["12a", "12b"])
+    parser.add_argument("--section", nargs="+", default=["12a", "12b", "12c"],
+                        choices=["12a", "12b", "12c"])
+    parser.add_argument("--synth-samples", type=int, default=16,
+                        help="goal/forbid pairs the 12c synthesis is run on")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--order-vectors", type=int, default=256,
                         help="graph vectors used to measure order separation")
@@ -432,8 +530,48 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         results["12b"] = run_order(tasks, embed, args.langs, transports, model,
                                    rel2idx, commutation, args.order_vectors,
                                    args.order_all_pairs)
+    if "12c" in args.section:
+        results["12c"] = {}
+        rel, forbid_rel = SYNTH_REL
+        if model is not None and rel in rel2idx and forbid_rel in rel2idx:
+            device = str(next(model.parameters()).device)
+            learned_transport = CheckpointTransport(model, rel2idx, device=device)
+            with torch.no_grad():
+                pool = model.node_emb_fixed[:args.order_vectors].to(device)
+            # a fixed rotation of one sample: goals and forbids are the same
+            # vectors paired differently, so nothing about the draw can favour
+            # one relation over the other (and no negative-stride views)
+            m = min(args.synth_samples, int(pool.shape[0]))
+            rng = np.random.default_rng(0)
+            pick = rng.choice(int(pool.shape[0]), size=m, replace=False)
+            half = m // 2
+            goals = pool[torch.as_tensor(pick, device=pool.device)].clone()
+            forbids = pool[torch.as_tensor(np.roll(pick, half),
+                                           device=pool.device)].clone()
+            results["12c"]["learned"] = run_synthesis(
+                learned_transport, goals, forbids, rel, forbid_rel)
+        else:
+            print("[12c] skipped: needs a checkpoint exposing both "
+                  f"{SYNTH_REL} relations")
+        # the embedder-free floor: a translation is not linear, so its
+        # violation of the identity is the number the learned operator is
+        # measured against, not a target to reach
+        for lang, tr in transports.items():
+            if rel in tr.relations and forbid_rel in tr.relations:
+                # the baseline cannot use the graph pool (different space), so
+                # it runs on the fixture's own seed words: the head of each
+                # seed pair is an ordinary word vector, and the two relations
+                # are the ones the learned operator is scored on too
+                m = int(args.synth_samples)
+                g = embed.encode([w[0] for w in LEXICON[rel][lang]][:m])
+                f = embed.encode([w[0]
+                                  for w in LEXICON[forbid_rel][lang]][:m])
+                n = min(int(g.shape[0]), int(f.shape[0]))
+                results["12c"][f"translation:{lang}"] = run_synthesis(
+                    tr, g[:n], f[:n], rel, forbid_rel)
 
     print_report(results)
+    print_synthesis_report(results)
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2, default=float)

@@ -69,6 +69,14 @@ from relgat_projector_apps.diagnostics.consistency_report import (
     find_best_checkpoint,
     read_jsonl,
 )
+from relgat_projector.core.diagnostics import (
+    auto_cosine_threshold,
+    cosine_dedup,
+    dedup_metrics,
+    high_cosine_contradiction_share,
+    typed_dedup,
+    verbose_vs_conflict,
+)
 from relgat_projector_apps.diagnostics.make_consistency_fixture import LEXICON
 
 DEFAULT_EMBEDDER = "ipipan/silver-retriever-base-v1.1"
@@ -151,6 +159,56 @@ def ids_of(names: Sequence[str], rel_ids: Optional[Dict[str, int]]) -> List[int]
 
 
 # -------------------------------------------------------------------- printing
+def print_dedup_report(results: Dict) -> None:
+    """01c: reduction and conflict recall, never one without the other."""
+    for lang, block in (results.get("dedup") or {}).items():
+        print(f"\n=== 01c contradiction-preserving dedup [{lang}] ===")
+        header = (f"{'rule':<26}{'kept':>6}{'reduction':>11}"
+                  f"{'conflict_recall':>17}{'duplicate_recall':>18}")
+        print(header)
+        print("-" * (len(header) - 1))
+        for row in block["rows"]:
+            print(f"{row['method']:<26}{row['kept']:>6}"
+                  f"{row['reduction']:>11.3f}{row['conflict_recall']:>17.3f}"
+                  f"{row['duplicate_recall']:>18.3f}")
+        share = block["share"]
+        print(f"  conflict recall = share of the {share['pairs_above_threshold']}"
+              f" gold antonym pairs both of whose members survived;"
+              f" duplicate recall is the cost side.")
+        print(f"  §7 go/no-go: of the pairs above cos {share['threshold']:.2f}, "
+              f"{share['contradiction_share']:.1%} are contradictions and "
+              f"{share['paraphrase_share']:.1%} paraphrases"
+              " -- below a few % the idea has no case.")
+
+
+def print_orbit_report(results: Dict) -> None:
+    """01d: three-state uncertainty against the binary semantic-entropy floor."""
+    for lang, block in (results.get("orbit") or {}).items():
+        print(f"\n=== 01d three-state uncertainty / orbit entropy [{lang}] ===")
+        header = (f"{'typer':<22}{'H verb':>8}{'H confl':>9}{'gap':>8}"
+                  f"{'bin verb':>10}{'bin confl':>11}{'bin gap':>9}"
+                  f"{'kappa':>8}{'alpha oos':>11}{'AUC t/b/k':>14}")
+        print(header)
+        print("-" * (len(header) - 4))
+        for name, r in (block.get("typer") or {}).items():
+            def g(key):
+                v = r.get(key, float("nan"))
+                return v if v == v else float("nan")
+            auc = (f"{g('auc_typed'):.2f}/{g('auc_binary'):.2f}"
+                   f"/{g('auc_kappa'):.2f}")
+            print(f"{name:<22}{g('H_orb_verbose'):>8.3f}{g('H_orb_conflict'):>9.3f}"
+                  f"{g('typed_gap'):>8.3f}{g('H_binary_verbose'):>10.3f}"
+                  f"{g('H_binary_conflict'):>11.3f}{g('binary_gap'):>9.3f}"
+                  f"{g('kappa_conflict'):>8.3f}{g('alpha_out_of_scope'):>11.3f}"
+                  f"{auc:>14}")
+        print(f"  {block['n_sets']} answer sets, gold by construction "
+              "(verbose = 2 wordings of one stance, conflict = opposite "
+              "stances of one topic, out_of_scope = different topics).")
+        print("  the claim of idea 04: typed_gap > 0 while the binary baseline "
+              "pays verbosity with fake uncertainty (its verbose column is the "
+              "tell); alpha is the third state the binary family cannot express.")
+
+
 def print_report(results: Dict) -> None:
     go = results.get("go_no_go") or {}
     if go:
@@ -220,6 +278,12 @@ def get_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                              "sits at mean pairwise cos 0.946, so a 0.9 cut merges "
                              "the whole corpus into one cluster")
     parser.add_argument("--translation-strength", type=float, default=1.0)
+    parser.add_argument("--entropy-threshold", type=float, default=0.0,
+                        help="cosine threshold of the binary semantic-entropy "
+                             "baseline in 01d, taken over the whole corpus; "
+                             "<=0 selects the 0.95 quantile of the corpus's own "
+                             "pair cosines, because a fixed cut means different "
+                             "things in spaces with different anisotropy")
     parser.add_argument("--json", dest="json_out", default=None)
     return parser.parse_args(argv)
 
@@ -260,7 +324,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         print(f"[baseline] {lexicon_path} not found: no embedder-free floor")
 
     results: Dict = {"gold_clusters": {}, "lang": {}, "notes": {}, "go_no_go": {},
-                     "n_items": len(items)}
+                     "dedup": {}, "orbit": {}, "n_items": len(items)}
+    gold = gold_pair_index(items)
+    gold_ant, gold_syn = gold["ant"], gold["syn"]
     for lang in args.langs:
         vecs = embed.encode(texts_of(items, lang)).detach().cpu().numpy()
         results["gold_clusters"][lang] = gold_k
@@ -293,12 +359,95 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     args.tau_attr, args.tau_appl, args.top_k, args.min_cos,
                     args.top_fraction, typer.name, results["notes"]))
 
+        # -------------------------------------------------------- 01c dedup
+        # the keep/drop decision of a dedup at the SAME reduction: a cosine
+        # threshold merges paraphrase and negation alike, the typed rule may
+        # merge only what it calls syn.  Both are reported against the gold
+        # pair classes, so the comparison is at matched cost.
+        orbit_out: Dict[str, Dict[str, float]] = {}
+        dedup_rows: List[Dict] = []
+        for thr in (0.99, 0.97, 0.95):
+            keep = cosine_dedup(vecs, thr)
+            dedup_rows.append({"method": f"cosine<={thr:.2f}",
+                               **dedup_metrics(keep, gold_ant, gold_syn)})
+        if lang in transports:
+            keep, _m = typed_dedup(_np(floor.prepare(
+                torch.as_tensor(vecs, dtype=torch.float32))),
+                floor, [0], tau_conf=0.3)
+            dedup_rows.append({"method": "typed:antonym-baseline",
+                               **dedup_metrics(keep, gold_ant, gold_syn)})
+        if model is not None:
+            for cls in (DecoderTyper, TransportTyper):
+                typer = cls(model, rel2idx, device=device)
+                keep, _m = typed_dedup(_np(typer.prepare(
+                    torch.as_tensor(vecs, dtype=torch.float32))),
+                    typer, ids_of(ATTRACTING, rel2idx), tau_conf=0.3)
+                dedup_rows.append({"method": f"typed:{typer.name}",
+                                   **dedup_metrics(keep, gold_ant, gold_syn)})
+        results["dedup"][lang] = {
+            "rows": dedup_rows,
+            "share": high_cosine_contradiction_share(
+                vecs, gold_ant, gold_syn, threshold=0.95),
+        }
+
+        # ------------------------------------------- 01d orbit entropy (04)
+        # three states, gold by construction out of the topic x stance layout:
+        # two wordings of one stance = verbose (one meaning, several sentences),
+        # opposite stances of one topic = conflict, two different topics = out
+        # of the coverage of the relations.  Sets are index groups into one
+        # charted matrix, so a typer charts the corpus once and the comparison
+        # across typers is on identical vectors.
+        index_of = {it["id"]: k for k, it in enumerate(items)}
+        by_topic: Dict[str, List[int]] = {}
+        for k, it in enumerate(items):
+            by_topic.setdefault(it["topic"][lang], []).append(k)
+        set_groups: List[Tuple[List[int], str]] = []
+        for its in by_topic.values():
+            pos = [k for k in its if items[k]["stance"] == 1][:2]
+            neg = [k for k in its if items[k]["stance"] == -1][:2]
+            if len(pos) >= 2 or len(neg) >= 2:
+                set_groups.append((pos, "verbose"))
+                set_groups.append((neg, "verbose"))
+            if pos and neg:
+                set_groups.append(([pos[0], neg[0]], "conflict"))
+        topics = list(by_topic)
+        for ai in range(len(topics)):
+            for bi in range(ai + 1, len(topics)):
+                set_groups.append(([by_topic[topics[ai]][0],
+                                    by_topic[topics[bi]][0]], "out_of_scope"))
+
+        def run_orbit(typer, charted, syn_ids, ant_ids) -> Dict[str, float]:
+            rows = [charted[g] for g, _ in set_groups]
+            # the binary baseline's cut is corpus-wide: per-set it is the
+            # quantile of a single number, which always merges
+            thr = (args.entropy_threshold if args.entropy_threshold > 0
+                   else auto_cosine_threshold(charted, 0.95))
+            return verbose_vs_conflict(rows, [lab for _, lab in set_groups],
+                                       typer, syn_ids, ant_ids, threshold=thr)
+
+        if lang in transports:
+            orbit_out["antonym-baseline"] = run_orbit(
+                floor, _np(floor.prepare(torch.as_tensor(vecs,
+                                                         dtype=torch.float32))),
+                [0], [1])
+        if model is not None:
+            for cls in (DecoderTyper, TransportTyper):
+                typer = cls(model, rel2idx, device=device)
+                orbit_out[typer.name] = run_orbit(
+                    typer, _np(typer.prepare(torch.as_tensor(vecs,
+                                                             dtype=torch.float32))),
+                    ids_of(ATTRACTING, rel2idx), ids_of(REPELLING, rel2idx))
+        results["orbit"][lang] = {"n_sets": len(set_groups),
+                                  "typer": orbit_out}
+
         results["lang"][lang] = rows
         results["notes"][f"gold_k_{lang}"] = float(gold_k)
     results["go_no_go"] = {k: v for k, v in results["notes"].items()
                            if k.startswith("go_no_go")}
 
     print_report(results)
+    print_dedup_report(results)
+    print_orbit_report(results)
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2, default=float)

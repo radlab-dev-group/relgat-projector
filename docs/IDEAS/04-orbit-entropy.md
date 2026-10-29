@@ -138,6 +138,43 @@ oznaczyć: (a) czy poprawna, (b) czy orbity dekodera zgadzają się z Twoim osą
 („to jest to samo znaczenie?"). Jeśli zgodność orbit z osądem ludzkim < 75%,
 entropia orbitowa nie ma fundamentu i nie warto budować reszty.
 
+## 7b. Pomiar na fiksie (sekcja 01d, 2026-10-29)
+
+Trzy stany są mierzone w `clustering_report` jako sekcja **01d**
+(`relgat_projector/core/diagnostics/uncertainty.py`). Zestawy odpowiedzi są
+goldem z konstrukcji fiksa 01, bez adnotacji:
+
+| złoty stan | konstrukcja |
+|---|---|
+| `verbose` | dwa sformułowania **tej samej** postawy w jednym temacie |
+| `conflict` | dwie **przeciwne** postawy w jednym temacie |
+| `out_of_scope` | pozycje z **dwóch różnych** tematów |
+
+Sygnały: `H_orb` (entropia orbit `syn`), `κ` (maks. ufność krawędzi `ant`
+pomiędzy orbitami), `α` (średnia `applicability`). Baseline'em binarnym jest
+`threshold_entropy` — entropia po klasteryzacji progiem cosine, czyli to, co
+liczy rodzina semantic-entropy.
+
+Dwa detale, bez których pomiar kłamie i zostały zapisane w kodzie:
+
+1. **próg baseline'u musi być liczony na całym korpusie**, nie na zestawie:
+   zbiór dwuelementowy ma jeden cosine, a kwantyl z jednej liczby to ta liczba,
+   więc baseline zawsze scala i raportuje płaskie 0.0;
+2. **próg względny, nie bezwzględny** — ta przestrzeń ma średni cosine par
+   0.946, więc stałe cięcie 0.85 scala wszystko (to sama lekcja co
+   `--top-fraction` w 01b).
+
+Pomiar (S13): `H_orb` verbose 0.433 vs konflikt 0.520, więc `typed_gap` jest
+dodatni, ale `κ ≈ 0.001` — dekoder na zdaniach nie widzi sprzeczności, tylko
+rozrzut. `α` dla `out_of_scope` = 1.0 (dekoder deklaruje pełną aplikowalność
+także tam, gdzie żadna relacja nie zachodzi), więc trzeci stan nie jest jeszcze
+wykrywalny. To znaczy, że §4 (przesądzający test „pewny, ale gadatliwy") jest
+**nerozstrzygnięty** do czasu treningu na zdaniach — i sekcja 01d teraz to
+pokazuje zamiast zakładać.
+
+Uruchomienie: `python -m relgat_projector_apps.diagnostics.clustering_report
+--ckpt <run>/best --langs pl en`.
+
 ## 8. Punkty odniesienia
 
 - Farquhar i in., *Semantic entropy is a hallucination signal…* (Nature 2024).

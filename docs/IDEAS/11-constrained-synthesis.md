@@ -135,6 +135,42 @@ metodom generującym wektor zawsze.
 | użytkownik nie umie sformułować ograniczeń | asystent LLM tłumaczy zdanie na ograniczenia; ale **rozwiązanie i tak jest numeryczne i sprawdzalne** |
 | `T⁻¹` niedokładne przy włączonym kontekście `ε` | liczyć bez kontekstu (`use_context=False`) — wtedy odwrotność jest dokładna (`CCE ≈ 1e-4`) |
 
+## 7b. Pomiar na fiksie (sekcja 12c, 2026-10-29)
+
+Pomysł doczekał się swojej sekcji w diagnostyce: **12c** w
+`consistency_report` (`relgat_projector/core/diagnostics/synthesis.py`). To, co
+czyni ją wartościową, to fakt, że **gold jest analityczny, nie adnotowany**:
+
+> Jeśli `T^T T = s^2 I`, to `cos(T_r v, a) = cos(v, T_r^{-1} a)` **dokładnie**.
+
+Zatem mierzona `identity_error` jest błędem ze znanym celem `0.0`. Na żadnej
+innej metryce w tym repo twierdzenie z §2 nie było wcześniej sprawdzane — a to
+na nim redukcja z §2 w ogóle stoi. Raportowane dodatkowo: czy ograniczenie
+`v*` trzyma się, gdy zmierzyć je **prawdziwym operatorem** (nie redukcją), i
+jak zamknięta forma wypada wobec `a - b`, czyli tego, co wszyscy wdrażają.
+
+| wariant | `identity_error` (gold 0) | p95 | cel (obj) | satysfakcja | `a-b` cel |
+|---|---|---|---|---|---|
+| uczony operator (S13) | **0.0009** | 0.0027 | 0.50 | 1.00 | 0.391 |
+| baseline translacyjny | 0.0646 | 0.0789 | 0.12 | 1.00 | 0.021 |
+
+Trzy wnioski:
+
+1. **Założenie o podobieństwie jest spełnione z błędem 9·10⁻⁴** — zamknięta
+   forma z §2 dla tego operatora jest uprawniona, i jest to pierwsza liczba,
+   która to stwierdza, a nie założenie.
+2. Baseline translacyjny łamie tożsamość **70× mocniej** (0.0646) — co jest
+   oczekiwane (translacja nie jest liniowa) i pokazuje skalę: bez operatora §11
+   nie ma podstawy matematycznej.
+3. Zamknięta forma osiąga cel **0.50 wobec 0.391** dla `a - b` (+28 %) —
+   przewaga jest realna, ale ograniczenie przy tym doborze par nie jest
+   aktywne (`constraint_active@τ = 0`), więc §11 zmierzył na razie *redukcję i
+   cel*, a nie *handel* między celem a zakazem. Pełny test wymaga par cel/
+   zakaz dobranych tak, by `cos(a', b') > τ`.
+
+Uruchomienie: `python -m relgat_projector_apps.diagnostics.consistency_report
+--ckpt <run>/best --section 12c`.
+
 ## 8. Test go/no-go
 
 20 wymyślonych par „cel + zakaz" na istniejącym indeksie. Sprawdzić, czy `v*`

@@ -19,6 +19,30 @@ from .clustering import (
     signed_weights,
     typing_auc,
 )
+from .dedup import (
+    cosine_dedup,
+    dedup_metrics,
+    high_cosine_contradiction_share,
+    typed_dedup,
+)
+from .synthesis import (
+    identity_error,
+    score_candidate,
+    synthesis_report,
+    synthesize,
+)
+from .uncertainty import (
+    ANSWER,
+    auto_cosine_threshold,
+    OUT_OF_SCOPE,
+    REFUSE,
+    decide,
+    orbit_entropy,
+    orbit_labels,
+    set_signals,
+    threshold_entropy,
+    verbose_vs_conflict,
+)
 from .consistency import (
     C_NO_EVIDENCE_TOLERANCE,
     REL_ANT,
@@ -70,5 +94,22 @@ __all__ = [
     "C_NO_EVIDENCE_TOLERANCE",
     "REL_ANT",
     "REL_SYN",
-
+    "ANSWER",
+    "auto_cosine_threshold",
+    "OUT_OF_SCOPE",
+    "REFUSE",
+    "cosine_dedup",
+    "decide",
+    "dedup_metrics",
+    "high_cosine_contradiction_share",
+    "identity_error",
+    "orbit_entropy",
+    "orbit_labels",
+    "score_candidate",
+    "set_signals",
+    "synthesis_report",
+    "synthesize",
+    "threshold_entropy",
+    "typed_dedup",
+    "verbose_vs_conflict",
 ]

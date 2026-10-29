@@ -128,6 +128,42 @@ Dodatkowo: na istniejącym korpusie zmierzyć, **ile procent par o cosine > 0.9
 to zdania sprzeczne** (audyt 100 par ręcznie). Jeśli > 5%, problem jest
 mierzalny i pomysł ma uzasadnienie ekonomiczne, zanim cokolwiek wytrenujemy.
 
+## 7b. Pomiar na fiksie (sekcja 01c, 2026-10-29)
+
+Pomysł jest mierzony razem z 01: `clustering_report` dokłada sekcję **01c**
+(`relgat_projector/core/diagnostics/dedup.py`). Reguła typująca scala wyłącznie
+krawędzie `syn`; baseline'em jest dedup po progu cosine (SemDeDup), a oba
+raportowane są **z własną redukcją**, bo bez osi kosztu liczba nie znaczy nic.
+
+Dwie metryki, zawsze obok siebie:
+
+- `reduction` — udział usuniętych pozycji (koszt),
+- `conflict_recall` — udział par `ant`, w których **oba**成员 przetrwały (to jest
+  to, co próg cosine niszczy).
+
+Test z §7 (`high_cosine_contradiction_share`) na fiksie 01 w przestrzeni
+`ipipan/silver-retriever-base-v1.1`: **śród par o cosine > 0.95 aż 28 % to
+sprzeczności** i 14 % parafrazy. Próg cosine scala więc sprzeczności
+systematycznie — warunek brzegowy pomysłu jest spełniony z nawiązką.
+
+| reguła | redukcja | conflict recall |
+|---|---|---|
+| próg cos ≤ 0.99 | 0.056 | 0.875 |
+| próg cos ≤ 0.97 | 0.556 | **0.062** |
+| próg cos ≤ 0.95 | 0.750 | **0.031** |
+| `typed:decoder` | 0.000 | 1.000 (nic nie scalone) |
+| `typed:transport` | 0.972 | 0.000 (scala wszystko) |
+
+Wniosek jest przykry i dlatego wart zapisania: **pułapka jest zmierzona, ale
+obecny operator jeszcze nie daje reguły, która ją omija**. Dekoder na zdaniach
+fiksa nie typuje żadnej pary jako `syn` (redukcja 0), a typowanie transportem
+`argmax_r cos(T_r a, b)` scala cały korpus w jeden klaster — obie porażki są
+spójne z niskim go/no-go 01a (~0.42–0.56). Reguła typująca ma sens dopiero po
+treningu zdaniowym; to jest dokładnie ta dziura, którą opisuje §6 ryzyk.
+
+Uruchomienie: `python -m relgat_projector_apps.diagnostics.clustering_report
+--ckpt <run>/best --langs pl en`.
+
 ## 8. Punkty odniesienia
 
 - SemDeDup (2023) — punkt wyjścia i główny baseline.
