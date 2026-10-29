@@ -995,6 +995,23 @@ class WiazkaTrainer:
         self._sync_stage_state()
 
     # ------------------------------------------------------------- sampling
+    def _sample_shadow(self, n: int) -> torch.Tensor:
+        """A fresh batch of shadow vectors, sampled rather than sliced.
+
+        ``ShadowSampler`` used to be constructed and never called: the F4
+        losses read ``self._shadow_cache[:n]``, i.e. the *same* ``n`` rows for
+        the whole run.  The off-graph cycle and commutation terms were
+        therefore fitted on a handful of fixed points, and with a supplied
+        corpus (``--shadow-vectors``) every vector past the first 64 was never
+        seen at all -- the manifold the operator regularises off the graph was
+        a prefix of its file, not the file.  Indices come from the sampler's
+        own rng, so a run stays reproducible from ``--seed``.
+        """
+        total = int(self._shadow_cache.shape[0])
+        n = int(min(max(1, n), total))
+        idx = self.shadow_sampler.rng.integers(0, total, size=n)
+        return self._shadow_cache[torch.as_tensor(idx, device=self._shadow_cache.device)]
+
     def _build_scheduler(self, steps_per_epoch: int, epochs: int) -> None:
         total = max(1, steps_per_epoch * epochs)
         warmup = max(1, int(self.cfg.warmup_ratio * total))
@@ -1656,7 +1673,7 @@ class WiazkaTrainer:
 
         if self.stage_manager.is_active("L_shadow"):
             # cycle + commutation consistency OFF the graph (PLAN.md 2.6)
-            z_base = self._shadow_cache[: min(self.cfg.shadow_batch, self._shadow_cache.shape[0])]
+            z_base = self._sample_shadow(self.cfg.shadow_batch)
             z = self.model.base_to_op(z_base)
             r_sh = torch.randint(0, self.num_rel, (z.shape[0],), device=device)
             z_fwd = self.model.apply(z, r_sh)

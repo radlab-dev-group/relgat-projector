@@ -247,6 +247,10 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--num-shadow", type=int, default=512,
                         help="shadow vectors synthesised when none are supplied")
     parser.add_argument("--shadow-jitter", type=float, default=0.35)
+    parser.add_argument("--shadow-batch", type=int, default=64,
+                        help="shadow vectors drawn per F4 step; with a supplied "
+                             "corpus this is how much of the off-graph manifold "
+                             "one step sees")
 
     # query rewriting validation (PLAN.md 5, QR-Recall)
     parser.add_argument("--qr-relations", type=str, default=None,
@@ -384,6 +388,7 @@ def main() -> None:
         probe_size=args.probe_size,
         num_shadow=args.num_shadow,
         shadow_jitter=args.shadow_jitter,
+        shadow_batch=args.shadow_batch,
         lr_scheduler=args.lr_scheduler,
         warmup_ratio=args.warmup_ratio,
     )
