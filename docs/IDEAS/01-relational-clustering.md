@@ -178,3 +178,49 @@ budowy. **To powinien być pierwszy eksperyment po przeczytaniu tego zbioru.**
 - Kod: `relgat_projector/core/heads/relation_decoder.py`,
   `relgat_projector/core/metrics/geometry.py` (`holonomy_defect`),
   `relgat_projector/handlers/wiazka_checkpoint.py` (`load_commutation`).
+## 10. Pomiar na fiksie (implementacja, 2026-10-29)
+
+Pomysł ma już działający benchmark, równoległy z diagnostyką z 12:
+`relgat_projector/core/diagnostics/clustering.py` (metryki + metoda, czysty
+numpy, bez nowych zależności) i aplikacja
+`relgat_projector_apps/diagnostics/clustering_report`. Fiks
+`data/clustering` (generator: `make_clustering_fixture`) to 36 zdań
+stanowiskowych, 8 tematów po 2 sformułowania na 2 postawie + 2 tematy
+„mieszane" (tak-ale), 18 klastrów gold = `temat x postawa`, 630 par
+gold: 16 syn / 32 ant / 18 mixed / 564 neutral. Gold jest z konstrukcji —
+zero adnotacji.
+
+Uruchomienie:
+
+```
+python -m relgat_projector_apps.diagnostics.make_clustering_fixture --out-dir data/clustering
+python -m relgat_projector_apps.diagnostics.clustering_report --best
+```
+
+Tabela: 01a (go/no-go §8) — AUC, którym pewność typowania rozdziela pary
+`ant` od `syn`, osobno dla każdego typeru; 01b — `metoda | klastry | ARI |
+NMI | CP | hidden | singletons`, gdzie CP to czystość sprzeczności: udział
+klastrów, w których nie ma pary kontradukcyjnej. ARI tego nie widzi, i
+tyle jest warta różnica.
+
+Pomiar na fiksie (embedder `ipipan/silver-retriever-base-v1.1`):
+
+| run | go/no-go AUC pl (decoder) | (transport) | (baseline antonim.) | CP kmeans | CP decoder | CP transport |
+|---|---|---|---|---|---|---|
+| S4 | 0.527 | 0.562 | 0.562 | 0.389 | 1.000 (0 krawędzi) | 0.722 |
+| S10 | 0.601 | 0.674 | 0.562 | 0.389 | 0.970 | 0.769 |
+| S11 | 0.586 | 0.645 | 0.562 | 0.389 | 0.967 | 0.786 |
+
+S4 w ogóle nie typuje krawędzi dekodera (0 na 156 par-kandydatów), więc jego
+wiersz `CP decoder = 1.000` to „nic nie scalone", nie sukces — raport oznacza
+takie wiersze flagą `(merged nothing)`.
+
+Signed AUC S11 (0.414 dla dekodera, 0.602 dla baseline antonimowego, 0.355
+dla transportu) potwierdza kierunek: sygnał jest słaby i nie stabilny
+pomiędzy modelami, co jest spójne z 12a — kierunek sprzeczności w transporcie
+jest słaby, a to on napędza oba diagnostyki.
+
+Testy: `tests/test_clustering_diagnostics.py` (23 testy: ARI/NMI wobec
+niezależnych wartości, CP widzi to, czego ARI nie widzi, zachowanie
+klasteryzacji na grafach wpiętych ręcznie, guard na pusty graf,
+generowanie fiksów).
