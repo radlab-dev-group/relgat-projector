@@ -14,72 +14,78 @@ class RelGATLayer(nn.Module):
     - `num_rel` : number of distinct relation types (≈40‑50)
     - `heads`   : number of attention heads
     - `use_bias`: optional scalar weight per relation (β_r) to modulate influence
+    - `relation_attention`: whether to learn relation-level attention weights
 
-        A relational Graph Attention Network (Rel‑GAT) layer that aggregates
-        information from neighbouring nodes while explicitly modelling
-        relation types between them.
+    A relational Graph Attention Network (Rel‑GAT) layer that aggregates
+    information from neighbouring nodes while explicitly modelling
+    relation types between them.
 
-        The implementation follows the multi‑head attention mechanism of
-        *Relational Graph Attention Networks* with the following design
-        choices:
+    The implementation follows the multi‑head attention mechanism of
+    *Relational Graph Attention Networks* with the following design
+    choices:
 
-        * **Input / output dimensionality** – The layer accepts node
-          embeddings of dimension ``in_dim`` and produces updated node
-          vectors of dimension ``heads * out_dim``.  Each attention head
-          operates in its own ``out_dim`` dimensional space and the
-          outputs are concatenated.
-        * **Relation‑specific attention** – For every head a trainable
-          attention vector of shape ``[num_rel, out_dim]`` is used.
-          The attention score for an edge ``i → j`` belonging to relation
-          ``r`` is computed as ``LeakyReLU((h_i ⊙ a_h[r]).sum)`` where
-          ``h_i`` is the projected source embedding.
-        * **Optional bias per relation** – A learnable scalar
-          ``β_r`` can be added to messages of relation ``r`` after
-          aggregation.  When disabled the bias is omitted.
-        * **Softmax normalisation** – Attention weights are normalised
-          per destination node and per head using the
-          :func:`torch_scatter.scatter_add` primitive, ensuring that
-          every neighbour contributes proportionally to its relation type
-          and relation‑specific attention.
-        * **Dropout** – A dropout layer is applied to the concatenated
-          output to regularise the model.
+    * **Input / output dimensionality** – The layer accepts node
+      embeddings of dimension ``in_dim`` and produces updated node
+      vectors of dimension ``heads * out_dim``.  Each attention head
+      operates in its own ``out_dim`` dimensional space and the
+      outputs are concatenated.
+    * **Relation‑specific attention** – For every head a trainable
+      attention vector of shape ``[num_rel, out_dim]`` is used.
+      The attention score for an edge ``i → j`` belonging to relation
+      ``r`` is computed as ``LeakyReLU((h_i ⊙ a_h[r]).sum)`` where
+      ``h_i`` is the projected source embedding.
+    * **Optional bias per relation** – A learnable scalar
+      ``β_r`` can be added to messages of relation ``r`` after
+      aggregation.  When disabled the bias is omitted.
+    * **Softmax normalisation** – Attention weights are normalised
+      per destination node and per head using the
+      :func:`torch_scatter.scatter_add` primitive, ensuring that
+      every neighbour contributes proportionally to its relation type
+      and relation‑specific attention.
+    * **Relation-level attention** – Optional attention weights for each
+      relation type that modulate the influence of relations during
+      message passing.
+    * **Dropout** – A dropout layer is applied to the concatenated
+      output to regularise the model.
 
-        Parameters
-        ----------
-        in_dim : int
-            Dimensionality of the input node embeddings.
-        out_dim : int
-            Dimensionality of each attention head's output space.
-        num_rel : int
-            Number of distinct relation types in the knowledge graph.
-        heads : int, default 4
-            Number of independent attention heads.
-        dropout : float, default 0.2
-            Drop‑out probability applied to the concatenated output.
-        use_bias : bool, default True
-            Whether to learn an additive bias for each relation type.
+    Parameters
+    ----------
+    in_dim : int
+        Dimensionality of the input node embeddings.
+    out_dim : int
+        Dimensionality of each attention head's output space.
+    num_rel : int
+        Number of distinct relation types in the knowledge graph.
+    heads : int, default 4
+        Number of independent attention heads.
+    dropout : float, default 0.2
+        Drop‑out probability applied to the concatenated output.
+    use_bias : bool, default True
+        Whether to learn an additive bias for each relation type.
+    relation_attention : bool, default True
+        Whether to learn relation-level attention weights.
 
-        Notes
-        -----
-        * All linear projections share the same parameters across
-          relations; only the attention vectors and optional bias are
-          relation‑specific.
-        * The implementation assumes that the node embeddings are fixed
-          (e.g., pre‑trained or stored in a database) and only the
-          relation embeddings and attention parameters are updated
-          during training.
-        * The forward method expects ``edge_index`` in COO format
-          ``[2, E]`` and ``edge_type`` of shape ``[E]``.
+    Notes
+    -----
+    * All linear projections share the same parameters across
+      relations; only the attention vectors and optional bias are
+      relation‑specific.
+    * The implementation assumes that the node embeddings are fixed
+      (e.g., pre‑trained or stored in a database) and only the
+      relation embeddings and attention parameters are updated
+      during training.
+    * The forward method expects ``edge_index`` in COO format
+      ``[2, E]`` and ``edge_type`` of shape ``[E]``.
 
-        Examples
-        --------
-        >>> layer = RelGATLayer(in_dim=1152, out_dim=200, num_rel=45, heads=4)
-        >>> node_emb = torch.randn(1000, 1152)
-        >>> edge_index = torch.randint(0, 1000, (2, 5000))
-        >>> edge_type = torch.randint(0, 45, (5000,))
-        >>> out = layer(node_emb, edge_index, edge_type)
-        >>> out.shape
-        torch.Size([1000, 800])   # 4 heads × 200 features each
+    Examples
+    --------
+    >>> layer = RelGATLayer(in_dim=1152, out_dim=200, num_rel=45, heads=4)
+    >>> node_emb = torch.randn(1000, 1152)
+    >>> edge_index = torch.randint(0, 1000, (2, 5000))
+    >>> edge_type = torch.randint(0, 45, (5000,))
+    >>> out = layer(node_emb, edge_index, edge_type)
+    >>> out.shape
+    torch.Size([1000, 800])   # 4 heads × 200 features each
     """
 
     STABLE_SOFTMAX_EPS = 1e-16
@@ -93,6 +99,7 @@ class RelGATLayer(nn.Module):
         dropout: float = 0.2,
         use_bias: bool = True,
         relation_attn_dropout: Optional[float] = None,
+        relation_attention: bool = True,
     ):
         super().__init__()
         self.in_dim = in_dim
@@ -103,6 +110,7 @@ class RelGATLayer(nn.Module):
         self.rel_attn_drop = nn.Dropout(
             p=relation_attn_dropout if relation_attn_dropout is not None else 0.0
         )
+        self.relation_attention = relation_attention
 
         # Linear projection per head (shared across relations)
         self.proj = nn.ModuleList(
@@ -120,6 +128,12 @@ class RelGATLayer(nn.Module):
         else:
             self.rel_bias = None
 
+        # Relation-level attention weights (dodane ulepszenie)
+        if relation_attention:
+            self.relation_weights = nn.Parameter(torch.ones(num_rel))
+        else:
+            self.relation_weights = None
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -127,6 +141,10 @@ class RelGATLayer(nn.Module):
             nn.init.xavier_uniform_(lin.weight)
         for a in self.attn_vec:
             nn.init.xavier_uniform_(a)
+        if self.rel_bias is not None:
+            nn.init.zeros_(self.rel_bias)
+        if self.relation_weights is not None:
+            nn.init.ones_(self.relation_weights)
 
     def forward(
         self,
@@ -197,7 +215,10 @@ class RelGATLayer(nn.Module):
            ``β_r`` is added to every aggregated message of relation
            *r*.
 
-        5. **Output** – The aggregated messages from all heads are
+        5. **Relation-level attention** – Optional attention weights
+           for each relation type that modulate the influence of relations.
+
+        6. **Output** – The aggregated messages from all heads are
            concatenated, optionally passed through dropout, and
            returned as the new node embeddings.
 
@@ -218,7 +239,6 @@ class RelGATLayer(nn.Module):
         # 1. Project node vectors for each head
         # proj_src[h] : [E, out_dim]
         proj_src = [lin(node_emb)[src] for lin in self.proj]  # list of length heads
-        # proj_dst = [lin(node_emb)[dst] for lin in self.proj]
 
         # --------------------------------------------------------------
         # 2. Compute un‑normalized attention
@@ -233,47 +253,6 @@ class RelGATLayer(nn.Module):
             e = F.leaky_relu(e, negative_slope=0.2)
             attn_scores.append(e)
 
-        # # 3. Softmax over neighbours (per destination)
-        # # Stack heads -> [heads, E]
-        # attn = torch.stack(attn_scores, dim=0)  # [H, E]
-        # # Apply softmax separately for each head
-        # attn = torch.exp(attn)
-        # # denominator: sum over incoming edges for each dst node, per head
-        # denom = scatter_add(attn, dst, dim=1, dim_size=N)  # [H, N]
-        # # avoid division by zero
-        # denom = denom + 1e-16
-        # attn = attn / denom[:, dst]  # normalized, [H, E]
-
-        # # 3. Stable softmax over neighbours (per destination)
-        # # Instead of using exp directly,
-        # # we subtract the per-dst maximum to stabilize the softmax.
-        # attn = []
-        # for h in range(self.heads):
-        #     e_h = attn_scores[h]  # [E]
-        #     # max per dst node
-        #     # initialize tensors to -inf and fill the maximum for each dst node
-        #     m = torch.full((N,), float("-inf"), device=e_h.device, dtype=e_h.dtype)
-        #
-        #     # per-dst max update
-        #     m.index_copy_(0, dst, torch.maximum(m[dst], e_h))
-        #
-        #     # gather m for edges
-        #     m_e = m[dst]
-        #
-        #     # stabilization: e' = e - m
-        #     e_shift = e_h - m_e
-        #     w = torch.exp(e_shift)
-        #
-        #     denom = scatter_add(w, dst, dim=0, dim_size=N)  # [N]
-        #     denom = denom.clamp_min(self.STABLE_SOFTMAX_EPS)
-        #
-        #     alpha = w / denom[dst]  # [E]
-        #
-        #     # optional dropout on attention weights (on edges)
-        #     if self.rel_attn_drop.p > 0.0:
-        #         alpha = self.rel_attn_drop(alpha)
-        #
-        #     attn.append(alpha)
         # --------------------------------------------------------------
         # 3. Stable softmax over neighbours (per destination)
         # --------------------------------------------------------------
@@ -296,6 +275,11 @@ class RelGATLayer(nn.Module):
             if self.rel_attn_drop.p > 0.0:
                 alpha = self.rel_attn_drop(alpha)
 
+            # ZASTOSOWANIE ATTENTION NA RELACJACH (dodane ulepszenie)
+            if self.relation_weights is not None:
+                rel_w = self.relation_weights[edge_type]  # [E]
+                alpha = alpha * rel_w
+
             attn.append(alpha)
 
         # --------------------------------------------------------------
@@ -309,15 +293,17 @@ class RelGATLayer(nn.Module):
         ]  # list of [N, out_dim]
 
         # --------------------------------------------------------------
-        # 5. Optional relation bias
-        if self.rel_bias is not None:
-            # bias per edge, broadcast to destination node after aggregation
-            bias = self.rel_bias[edge_type]  # [E]
-            bias = scatter_add(bias, dst, dim=0, dim_size=N)  # [N]
-            bias = bias.unsqueeze(-1)  # [N,1]
-            out = [h + bias for h in out]
-
+        # 5. Optional relation bias (naprawione: po concat heads)
+        # --------------------------------------------------------------
         # 6. Concatenate heads
         out = torch.cat(out, dim=-1)  # [N, heads*out_dim]
+
+        # Dodaj bias PO concatenacji (nie przed!)
+        if self.rel_bias is not None:
+            bias = self.rel_bias[edge_type]  # [E]
+            bias = scatter_add(bias, dst, dim=0, dim_size=N)  # [N]
+            bias = bias.unsqueeze(-1)  # [N, 1]
+            out = out + bias
+
         out = self.dropout(out)
         return out

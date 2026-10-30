@@ -1,7 +1,8 @@
 import json
-import torch
 import pickle
+import torch
 import argparse
+from typing import Optional, Dict, Any
 
 from relgat_projector.base.constants import ConstantsRelGATTrainer
 from relgat_projector.trainer.relgat_projector import RelGATTrainer
@@ -12,21 +13,18 @@ class RelGATMainTrainerHandler:
     def load_embeddings_and_edges(
         path_to_nodes: str, path_to_rels: str, path_to_edges: str
     ):
-        # node2emb – dict[int, torch.Tensor]
         print("Loading", path_to_nodes)
         with open(path_to_nodes, "rb") as f:
             _node2emb = pickle.load(f)
         _node2emb = {int(k): torch.tensor(v) for k, v in _node2emb.items()}
         print(f"  - number of loaded nodes: {len(_node2emb)}")
 
-        # rel2idx – dict[str, int]
         print("Loading", path_to_rels)
         with open(path_to_rels, "r") as f:
             _rel2idx = json.loads(f.read())
         _rel2idx = {str(k): int(v) for k, v in _rel2idx.items()}
         print(f"  - number of loaded rel2idx: {len(_rel2idx)}")
 
-        # edge_index_raw – list[(src, dst, rel_str)]
         print("Loading", path_to_edges)
         with open(path_to_edges, "r") as f:
             _edge_index_raw = json.loads(f.read())
@@ -46,7 +44,9 @@ class RelGATMainTrainerHandler:
         rel2idx,
         edge_index_raw,
         args: argparse.Namespace,
+        run_config: Optional[Dict[str, Any]] = None,
     ) -> RelGATTrainer:
+        # Merge default run_config z user-provided
         run_cfg = {
             # Reproduction
             "seed": args.seed,
@@ -86,7 +86,6 @@ class RelGATMainTrainerHandler:
             "save_every_n_steps": args.save_every_n_steps,
             "eval_every_n_steps": args.eval_every_n_steps,
             # Additional training args
-            # "use_amp": args.use_amp,
             "disable_edge_type_mask": args.disable_edge_type_mask,
             "use_self_adv_neg": args.use_self_adv_neg,
             "self_adv_alpha": args.self_adv_alpha,
@@ -97,6 +96,25 @@ class RelGATMainTrainerHandler:
             "pos_cosine_weight": args.pos_cosine_weight,
             "neg_cosine_weight": args.neg_cosine_weight,
             "mse_weight": args.mse_weight,
+            # Ontology-aware features
+            "ontology_similarity": (
+                run_config.get("ontology_similarity")
+                if run_config
+                else args.ontology_similarity
+            ),
+            "ontology_reg_weight": (
+                run_config.get("ontology_reg_weight", args.ontology_reg_weight)
+                if run_config
+                else args.ontology_reg_weight
+            ),
+            "relation_attention": (
+                run_config.get("relation_attention", args.relation_attention)
+                if run_config
+                else args.relation_attention
+            ),
+            "wordnet_rel_embeddings": (
+                run_config.get("wordnet_rel_embeddings") if run_config else None
+            ),
         }
 
         trainer = RelGATTrainer(
@@ -134,7 +152,6 @@ class RelGATMainTrainerHandler:
             # Storage
             out_dir=run_cfg["out_dir"],
             max_checkpoints=run_cfg["max_checkpoints"],
-            # train_ratio=run_cfg["train_ratio"],
             # N-step
             save_every_n_steps=run_cfg["save_every_n_steps"],
             eval_every_n_steps=run_cfg["eval_every_n_steps"],
@@ -142,7 +159,6 @@ class RelGATMainTrainerHandler:
             log_grad_norm=True,
             log_every_n_steps=run_cfg["log_every_n_steps"],
             # Additional params
-            # use_amp=run_cfg["use_amp"],
             weight_decay=run_cfg["weight_decay"],
             grad_clip_norm=run_cfg["grad_clip_norm"],
             disable_edge_type_mask=run_cfg["disable_edge_type_mask"],

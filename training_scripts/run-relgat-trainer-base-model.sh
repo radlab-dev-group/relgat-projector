@@ -23,13 +23,13 @@ if [[ "${ARCHITECTURE}" == "small" ]]
 then
   EPOCHS=60
   BATCH_SIZE=128
-  NUM_NEG_TO_POS=32
+  NUM_NEG_TO_POS=16
 
   GAT_OUT_DIM=128
-  NUM_OF_LAYERS=2
-  NUM_OF_HEADS=16
+  NUM_OF_LAYERS=3
+  NUM_OF_HEADS=8
 
-  LEARNING_RATE=0.00002
+  LEARNING_RATE=0.0001
 
   SAVE_N_STEPS=300
   EVAL_N_STEPS=150
@@ -71,7 +71,7 @@ fi
 
 # =============================================================================
 # Scorer, one of: [distmult, transe]
-SCORER="distmult"
+SCORER="transe"
 
 # Enable value above, to use the projection to base embedding size.
 # Relation embeddings will be projected to the input embedding size
@@ -88,18 +88,18 @@ PROJECTION_HIDDEN_DIM=0
 # ... then following weights will be used:
 RELGAT_WEIGHT=1.0
 # Weigh for positive cosine
-COSINE_WEIGHT_POS=1.0
+COSINE_WEIGHT_POS=0.5
 # Weigh for negative cosine
-COSINE_WEIGHT_NEG=1.0
+COSINE_WEIGHT_NEG=0.5
 # Weigh for mean square error
-MSE_WEIGHT=0.0
+MSE_WEIGHT=0.1
 
 # Project to input size embeddings (if option is given).
 # If not set, then frozen-GAT will be learned
 # PROJECT_TO_INPUT_SIZE=1
 
 # Dropout used while training (on embedder dimension)
-DROPOUT=0.3
+DROPOUT=0.2
 
 # Relation attention dropout
 DROPOUT_REL_ATT=0.0

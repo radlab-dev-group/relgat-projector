@@ -27,6 +27,7 @@ class RelGATModel(nn.Module):
         projection_layers: int = 1,
         projection_dropout: float = 0.0,
         projection_hidden_dim: int = 0,
+        wordnet_rel_embeddings: Optional[torch.Tensor] = None,  # ← ULEPSZENIE
     ):
         super().__init__()
         self.register_buffer("node_emb_fixed", node_emb)  # not a Parameter
@@ -36,6 +37,7 @@ class RelGATModel(nn.Module):
         self.gat_num_layers = gat_num_layers
         self.projection_layers = projection_layers
         self.project_to_input_size = project_to_input_size
+
         if project_to_input_size and self.projection_layers < 1:
             raise ValueError(
                 "projection_layers must be >= 1 when project_to_input_size=True"
@@ -50,6 +52,7 @@ class RelGATModel(nn.Module):
                 dropout=dropout,
                 relation_attn_dropout=relation_attn_dropout,
                 use_bias=True,
+                relation_attention=True,  # ← ULEPSZENIE
             )
             # No activation between layers
             self.act = None
@@ -66,6 +69,7 @@ class RelGATModel(nn.Module):
                         dropout=dropout,
                         relation_attn_dropout=relation_attn_dropout,
                         use_bias=True,
+                        relation_attention=True,  # ← ULEPSZENIE
                     )
                 )
                 # subsequent layers now receive the dimension heads*out_dim
@@ -88,13 +92,29 @@ class RelGATModel(nn.Module):
 
         self.scorer_type = scorer_type
         if scorer_type.lower() == "distmult":
-            self.scorer = DistMultScorer(num_rel, rel_dim=_scorer_gat_dim)
+            self.scorer = DistMultScorer(
+                num_rel, rel_dim=_scorer_gat_dim, normalize=True
+            )
         elif scorer_type.lower() == "transe":
             self.scorer = TransEScorer(
                 num_rel, rel_dim=_scorer_gat_dim, normalize=True
             )
         else:
             raise ValueError(f"Unknown scorer_type: {scorer_type}")
+
+        # ULEPSZENIE: Inicjalizacja z WordNet
+        self.wordnet_init = wordnet_rel_embeddings is not None
+        if wordnet_rel_embeddings is not None:
+            # Zastąp embeddingi relacji z WordNet
+            if wordnet_rel_embeddings.size(0) >= num_rel:
+                self.scorer.rel_emb.weight = nn.Parameter(
+                    wordnet_rel_embeddings[:num_rel]
+                )
+                print("Initialized relation embeddings from WordNet")
+            else:
+                print(
+                    f"Warning: WordNet has {wordnet_rel_embeddings.size(0)} relations, requested {num_rel}"
+                )
 
     def forward(
         self,
@@ -129,15 +149,17 @@ class RelGATModel(nn.Module):
         ]
         Compatibility scores (higher ⇒ more plausible), optional projection
         to embedding space and destination vector
-
-
         """
         x = self.single_gat_step()
         src_vec = x[src_ids]  # [B, D']
         dst_vec = x[dst_ids]  # [B, D']
         transformed = None
+
         if self.project_to_input_size and transform_to_input_if_possible:
             transformed = self.scorer.transform(src_vec, rel_ids)  # [B, D_sc]
+            # NAPRAWA: dst_vec też powinien być transformowany
+            dst_vec = self.scorer.transform(dst_vec, rel_ids)  # [B, D_sc]
+
         scores = self.scorer(src_vec, rel_ids, dst_vec)  # [B]
         return scores, transformed, dst_vec
 
@@ -214,6 +236,14 @@ class RelGATModel(nn.Module):
         w_path = os.path.join(output_dir, "pytorch_model.bin")
         torch.save(self.state_dict(), w_path)
 
+        # ULEPSZENIE: Zapisz edge_index i edge_type jako pliki .pt
+        edge_index_path = os.path.join(output_dir, "edge_index.pt")
+        edge_type_path = os.path.join(output_dir, "edge_type.pt")
+        torch.save(self.edge_index, edge_index_path)
+        torch.save(self.edge_type, edge_type_path)
+        print(f"Saved edge_index to {edge_index_path}")
+        print(f"Saved edge_type to {edge_type_path}")
+
     @staticmethod
     def load_from_pretrained(
         input_dir: str,
@@ -241,6 +271,18 @@ class RelGATModel(nn.Module):
 
         with open(cfg_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+
+        # ULEPSZENIE: Ładowanie edge_index i edge_type automatycznie
+        edge_index_path = os.path.join(input_dir, "edge_index.pt")
+        edge_type_path = os.path.join(input_dir, "edge_type.pt")
+
+        if edge_index is None and os.path.isfile(edge_index_path):
+            edge_index = torch.load(edge_index_path, map_location=map_location)
+            print(f"Loaded edge_index from {edge_index_path}")
+
+        if edge_type is None and os.path.isfile(edge_type_path):
+            edge_type = torch.load(edge_type_path, map_location=map_location)
+            print(f"Loaded edge_type from {edge_type_path}")
 
         # Walidacja wymiarów
         if int(cfg.get("input_dim")) != int(node_emb.size(1)):

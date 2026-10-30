@@ -20,6 +20,10 @@ class DistMultScorer(nn.Module):
         Dimensionality of the relation embeddings.  This dimension
         should match the dimensionality of the node embeddings that
         will be supplied to :meth:`forward`.
+    normalize : bool, default True
+        If ``True``, L2‑normalize source, relation, and destination
+        embeddings before computing the score.  This helps
+        keep embeddings on a unit sphere and stabilises training.
 
     Notes
     -----
@@ -27,6 +31,7 @@ class DistMultScorer(nn.Module):
       uniform distribution to facilitate stable training.
     * ``forward`` returns a score vector of shape ``[B]`` where
       higher values correspond to more plausible triples.
+    * Normalization helps prevent gradient explosion and improves stability.
 
     Examples
     --------
@@ -39,7 +44,7 @@ class DistMultScorer(nn.Module):
     torch.Size([32])
     """
 
-    def __init__(self, num_rel: int, rel_dim: int):
+    def __init__(self, num_rel: int, rel_dim: int, normalize: bool = True):
         """
         Initialize the DistMult scorer.
 
@@ -49,11 +54,14 @@ class DistMultScorer(nn.Module):
             Number of distinct relation types in the knowledge graph.
         rel_dim : int, optional
             Dimensionality of the relation embeddings.
+        normalize : bool, default True
+            Whether to normalize embeddings before scoring.
         """
 
         super().__init__()
         self.rel_emb = nn.Embedding(num_rel, rel_dim)
         nn.init.xavier_uniform_(self.rel_emb.weight)
+        self.normalize = normalize
 
     def forward(
         self, src_emb: torch.Tensor, rel_ids: torch.Tensor, dst_emb: torch.Tensor
@@ -79,6 +87,12 @@ class DistMultScorer(nn.Module):
         # [B, D] shape
         rel_emb = self.rel_emb(rel_ids)
 
+        # Normalize embeddings if requested
+        if self.normalize:
+            src_emb = torch.nn.functional.normalize(src_emb, p=2, dim=-1)
+            rel_emb = torch.nn.functional.normalize(rel_emb, p=2, dim=-1)
+            dst_emb = torch.nn.functional.normalize(dst_emb, p=2, dim=-1)
+
         # dot product
         score = (src_emb * rel_emb * dst_emb).sum(dim=-1)
         return score
@@ -91,6 +105,12 @@ class DistMultScorer(nn.Module):
         x' = x ⊙ r
         """
         rel_emb = self.rel_emb(rel_ids)  # [B, D]
+
+        # Normalize embeddings if requested
+        if self.normalize:
+            src_emb = torch.nn.functional.normalize(src_emb, p=2, dim=-1)
+            rel_emb = torch.nn.functional.normalize(rel_emb, p=2, dim=-1)
+
         return src_emb * rel_emb
 
 

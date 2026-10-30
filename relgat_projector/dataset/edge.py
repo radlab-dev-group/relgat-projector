@@ -1,7 +1,7 @@
 import torch
 import random
 
-from typing import Tuple
+from typing import Tuple, List, Optional
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -65,6 +65,25 @@ class EdgeDataset(Dataset):
         )
         self.rel_cnt = len(rel2idx)
 
+        # PRZYGOTOWANIE DO WYDAJNEGO SAMPLINGU
+        self.all_node_set = set(self.all_node_ids)
+        self._precompute_negative_candidates()
+
+    def _precompute_negative_candidates(self):
+        """
+        PRZYGOTOWANIE KANDYDATÓW NA NEGATYWY DLA KAŻDEGO NODE
+        (dla wydajności zamiast random.choice z pętlą while)
+        """
+        self.neg_candidates = {}
+        for edge in self.edges:
+            src, dst, _ = edge
+            # Usuń oryginalny destination z kandydatów
+            candidates = self.all_node_set - {dst}
+            if len(candidates) > 0:
+                self.neg_candidates[(src, dst)] = list(candidates)
+            else:
+                self.neg_candidates[(src, dst)] = []
+
     def __len__(self):
         return len(self.edges)
 
@@ -88,27 +107,39 @@ class EdgeDataset(Dataset):
         src, dst, rel_name = self.edges[idx]
         rel_id = self.rel2idx[rel_name]
 
-        # Positive example (rel_id as a long tensor with shape[1])
+        # Positive example
         pos = (
             torch.tensor([src], dtype=torch.long),
             torch.tensor([rel_id], dtype=torch.long),
             torch.tensor([dst], dtype=torch.long),
+            torch.tensor([1.0], dtype=torch.float),  # ← NAPRAWA: label dla pozytywu
         )
 
-        # Negative examples (corrupted destination)
+        # Negative examples (z wydajnego samplingu)
         neg = []
+        candidates = self.neg_candidates.get((src, dst), [])
+
         for _ in range(self.num_neg):
-            # randomly pick a different destination node
-            corrupt_dst = random.choice(self.all_node_ids)
-            while corrupt_dst == dst:
-                corrupt_dst = random.choice(self.all_node_ids)
+            if len(candidates) > 0:
+                # BEZPIECZNY WYBÓR bez pętli while
+                corrupt_dst = random.choice(candidates)
+            else:
+                # Jeśli brak kandydatów, użyj losowego (chyba że tylko 1 node)
+                if len(self.all_node_ids) > 1:
+                    corrupt_dst = random.choice(self.all_node_ids)
+                    while corrupt_dst == dst:
+                        corrupt_dst = random.choice(self.all_node_ids)
+                else:
+                    corrupt_dst = dst  # Ostateczność
 
             neg.append(
                 (
                     torch.tensor([src], dtype=torch.long),
                     torch.tensor([rel_id], dtype=torch.long),
                     torch.tensor([corrupt_dst], dtype=torch.long),
-                    # torch.tensor(0.0),
+                    torch.tensor(
+                        [0.0], dtype=torch.float
+                    ),  # ← NAPRAWA: label dla negatywu
                 )
             )
 
