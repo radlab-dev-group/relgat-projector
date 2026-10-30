@@ -161,6 +161,15 @@ class WiazkaConfig:
     shadow_jitter: float = 0.35
     # F4: shadow vectors drawn per step (PLAN.md 2.6)
     shadow_batch: int = 64
+    # F4: sentence-level transport supervision (PLAN.md 2.6)
+    #: weight of L_shadow_sent; 0 disables the term
+    shadow_sent_weight: float = 0.0
+    #: sentence pairs drawn per step for L_shadow_sent
+    shadow_sent_batch: int = 256
+    #: softmax temperature of L_shadow_sent; 0 = derive it from the measured
+    #: random-pair cosine spread of the sentence corpus, the same way
+    #: ``pull_temperature`` is resolved for the node index
+    shadow_sent_temperature: float = 0.0
     #: number of nearest distractors ``L_con`` scores instead of the whole
     #: key set.  A full softmax over 243k nodes spends almost all of its mass
     #: on nodes that were never candidates, so the term saturates (measured
@@ -523,6 +532,8 @@ class WiazkaTrainer:
         edges: List[Tuple[int, int, str]],
         cfg: Optional[WiazkaConfig] = None,
         shadow_vectors=None,
+        shadow_sentences=None,
+        shadow_sentence_lus=None,
     ):
         self.cfg = cfg or WiazkaConfig()
         torch.manual_seed(self.cfg.seed)
@@ -927,6 +938,91 @@ class WiazkaTrainer:
             self.cfg.device
         )
 
+        # Sentence-level F4 (PLAN.md 2.6): real usage examples tagged with the
+        # LU they illustrate.  The off-graph losses above regularise the
+        # operator where it has to work on text; they do not teach it to move
+        # text along a relation, because an exact-inverse operator satisfies
+        # ``T_r^-1(T_r z) = z`` identically and the term carries no gradient
+        # (measured L_shadow_cycle = 0.0000 through a whole run).  This index
+        # is what turns F4 into supervision: for a graph edge (a, r, b) whose
+        # endpoints own usage examples, ``T_r`` is trained to carry *the
+        # sentence of a* onto *the sentence of b*.
+        self._sent_cache: Optional[torch.Tensor] = None
+        self._sent_lu: Optional[torch.Tensor] = None
+        self._sent_edges: Optional[torch.Tensor] = None
+        #: CSR over node rows -> positions in ``_sent_cache`` (vectorised draw)
+        self._lu_sent_offsets: Optional[torch.Tensor] = None
+        self._lu_sent_flat: Optional[torch.Tensor] = None
+        if shadow_sentences is not None and shadow_sentence_lus is not None:
+            sents = np.ascontiguousarray(shadow_sentences, dtype=np.float32)
+            luids = np.asarray(shadow_sentence_lus, dtype=np.int64)
+            if len(sents) != len(luids):
+                raise ValueError(
+                    f"{len(sents)} sentence vectors but {len(luids)} LU ids")
+            if sents.shape[1] != self.node_emb.shape[1]:
+                raise ValueError(
+                    f"sentence dim {sents.shape[1]} != node dim "
+                    f"{self.node_emb.shape[1]}: the corpus must come from the "
+                    "same embedder as the nodes")
+            row_of = np.full(len(luids), -1, dtype=np.int64)
+            for k, nid in enumerate(luids):
+                row_of[k] = self.id2idx.get(int(nid), -1)
+            keep = np.nonzero(row_of >= 0)[0]
+            if keep.size == 0:
+                raise ValueError(
+                    "no shadow sentence maps to a graph node: the LU ids of "
+                    "the corpus and the node ids of the dataset are different "
+                    "exports")
+            rows_kept = row_of[keep]
+            self._sent_cache = torch.as_tensor(
+                sents[keep], dtype=torch.float32).to(self.cfg.device)
+            # sentences whose LU is not in the graph carry no supervision at
+            # all: they inflate the key set without ever being a target, so
+            # they are dropped rather than kept as permanent negatives
+            self._sent_lu = torch.as_tensor(rows_kept, dtype=torch.long).to(
+                self.cfg.device)
+            counts = np.bincount(rows_kept, minlength=self.num_nodes)
+            # CSR: node row -> the cache positions of its sentences.  The
+            # positions must be *cache* rows grouped by node, not the corpus
+            # indices in corpus order (that is not a grouping at all, and a
+            # draw from such a "segment" returns another node's sentence)
+            order = np.argsort(rows_kept, kind="stable")
+            self._lu_sent_offsets = torch.as_tensor(
+                np.concatenate([[0], np.cumsum(counts)]), dtype=torch.long)
+            self._lu_sent_flat = torch.as_tensor(
+                np.arange(len(keep), dtype=np.int64)[order])
+            self._lu_sent_offsets = self._lu_sent_offsets.to(self.cfg.device)
+            self._lu_sent_flat = self._lu_sent_flat.to(self.cfg.device)
+            # supervised triples: a TRAIN edge whose endpoints both own a
+            # sentence (the held-out probe stays untouched)
+            has = counts > 0
+            # ``self.edges`` is already compact: (src row, dst row, rel id)
+            pairs = [(s, d, r) for s, d, r in self.edges if has[s] and has[d]]
+            self._sent_edges = torch.tensor(pairs, dtype=torch.long)
+            print(
+                f"[data] sentence F4: {self._sent_cache.shape[0]} sentences "
+                f"({len(luids) - keep.size} dropped, LU outside the graph) "
+                f"over {int((counts > 0).sum())} LUs, {len(pairs)} supervised "
+                f"(src, dst, rel) edges")
+
+            # The sentence corpus is a different space from the node chart:
+            # measured here rather than assumed, because the temperature is
+            # only meaningful relative to the spread of the keys it scores.
+            spread = torch.as_tensor(sents[keep], dtype=torch.float32)
+            spread = spread / spread.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            sample = spread[torch.randperm(len(spread))[: min(8192, len(spread))]]
+            sim = sample @ sample.t()
+            off_diag = ~torch.eye(len(sample), dtype=torch.bool)
+            sent_cos_std = float(sim[off_diag].std())
+            temp = (float(self.cfg.shadow_sent_temperature)
+                    if float(self.cfg.shadow_sent_temperature) > 0.0
+                    else 0.07 * sent_cos_std / float(REFERENCE_COS_STD_RAW))
+            self.cfg.shadow_sent_temperature = float(temp)
+            self.shadow_sent_loss = ContrastLoss(temperature=temp)
+            print(f"[geometry] sentence corpus random-pair cos "
+                  f"{float(sim[off_diag].mean()):+.4f}+-{sent_cos_std:.4f} "
+                  f"-> L_shadow_sent T={temp:.5f}")
+
         # NOTE: CurvatureLoss owns the commutation matrix C_rs as a parameter,
         # so the optimizer must include the loss modules, not only the model.
         # Omitting them silently freezes C_rs at its initialisation.
@@ -1011,6 +1107,67 @@ class WiazkaTrainer:
         n = int(min(max(1, n), total))
         idx = self.shadow_sampler.rng.integers(0, total, size=n)
         return self._shadow_cache[torch.as_tensor(idx, device=self._shadow_cache.device)]
+
+    def _sample_shadow_pairs(self, n: int):
+        """``(sentence of a, sentence of b, rel, a, b)`` for real TRAIN edges.
+
+        Both endpoints own at least one Słowosieć usage example, so the tuple
+        is a genuine supervision pair *off the graph*: the two vectors are text
+        from the retriever index, and the graph says they stand in relation
+        ``rel``.  Sentences of one LU are drawn uniformly, so a relation is
+        taught on as many distinct wordings as the corpus has.
+        """
+        if self._sent_edges is None or self._sent_edges.shape[0] == 0:
+            return None
+        device = self._sent_cache.device
+        total = int(self._sent_edges.shape[0])
+        n = int(min(max(1, n), total))
+        edge = self._sent_edges.to(device)[
+            torch.randint(0, total, (n,), device=device)]
+        src, dst, rel = edge[:, 0], edge[:, 1], edge[:, 2]
+
+        def pick(nodes: torch.Tensor) -> torch.Tensor:
+            lo = self._lu_sent_offsets[nodes]
+            span = (self._lu_sent_offsets[nodes + 1] - lo).clamp_min(1)
+            off = (torch.rand_like(span, dtype=torch.float32)
+                   * span.to(torch.float32)).long()
+            return self._lu_sent_flat[lo + off]
+
+        return (self._sent_cache[pick(src)], self._sent_cache[pick(dst)],
+                rel, src, dst)
+
+    def _shadow_pair_mask(self, src: torch.Tensor, rel: torch.Tensor,
+                          dst: torch.Tensor) -> torch.Tensor:
+        """``[B, B]`` bool: True where a *key* of the batch is not an answer.
+
+        In-batch negatives are other edges' target sentences.  Two classes of
+        them are correct answers and must be masked, exactly as
+        :meth:`_false_negative_mask` does for the node index: another true
+        target of the same ``(src, rel)`` (the graph is a multi-graph), and the
+        subject of the query itself -- the Słowosieć has no self-loops, so a
+        sentence of ``a`` is never the answer to ``a -r->``.
+        """
+        b = int(src.shape[0])
+        mask = torch.zeros((b, b), dtype=torch.bool, device=src.device)
+        src_cpu, rel_cpu, dst_cpu = (src.detach().cpu().tolist(),
+                                     rel.detach().cpu().tolist(),
+                                     dst.detach().cpu().tolist())
+        rows, cols = [], []
+        for i, (a, r, d) in enumerate(zip(src_cpu, rel_cpu, dst_cpu)):
+            targets = self._targets_by_src_rel.get((a, r))
+            if not targets:
+                continue
+            tset = set(targets)
+            for j, dj in enumerate(dst_cpu):
+                if j != i and dj in tset:
+                    rows.append(i)
+                    cols.append(j)
+        if rows:
+            mask[torch.tensor(rows, device=src.device),
+                 torch.tensor(cols, device=src.device)] = True
+        # the query's own subject: a sentence of `a` as the answer to `a -r->`
+        same = src.unsqueeze(1) == dst.unsqueeze(0)
+        return mask | same
 
     def _build_scheduler(self, steps_per_epoch: int, epochs: int) -> None:
         total = max(1, steps_per_epoch * epochs)
@@ -1687,6 +1844,31 @@ class WiazkaTrainer:
             loss = loss + l_sh_cyc + l_sh_com
             log["L_shadow_cycle"] = float(l_sh_cyc.item())
             log["L_shadow_commut"] = float(l_sh_com.item())
+
+        if (self.stage_manager.is_active("L_shadow")
+                and self._sent_edges is not None
+                and float(self.cfg.shadow_sent_weight) > 0.0):
+            # Sentence-level transport supervision (PLAN.md 2.6).  The cycle
+            # and commutation terms above are *regularisers* and, with an
+            # exactly invertible operator, the cycle is an identity: they can
+            # tell the operator where not to go, never where to go.  This term
+            # is the positive signal F4 was missing -- take a real edge
+            # (a, r, b), take the *sentences* the two units own, and demand
+            # that the served query path carries the sentence of ``a`` onto
+            # the sentence of ``b``.  It is scored against the raw sentence
+            # vectors with the same InfoNCE the product term uses, so the
+            # operator is trained on text, in the space the diagnostics
+            # (ideas 01/12) measure.
+            pairs = self._sample_shadow_pairs(self.cfg.shadow_sent_batch)
+            if pairs is not None:
+                s_src, s_dst, rel_s, a_s, b_s = pairs
+                q_sent = self.model.production_query(s_src, rel_s)
+                target = torch.arange(s_dst.shape[0], device=device)
+                l_sent = self.shadow_sent_loss(
+                    q_sent, s_dst, target,
+                    mask=self._shadow_pair_mask(a_s, rel_s, b_s))
+                loss = loss + self.cfg.shadow_sent_weight * l_sent
+                log["L_shadow_sent"] = float(l_sent.item())
 
         if self.stage_manager.is_active("L_pull"):
             # The *production* objective: the vector database holds the base

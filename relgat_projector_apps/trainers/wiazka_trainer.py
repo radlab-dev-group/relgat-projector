@@ -27,6 +27,7 @@ import torch
 from relgat_projector.handlers.wiazka_dataset import (
     load_graph_dataset,
     load_shadow_vectors,
+    load_shadow_sentences,
 )
 from relgat_projector.trainer.wiazka_trainer import WiazkaConfig, WiazkaTrainer
 
@@ -50,6 +51,30 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--shadow-vectors", type=str, default=None,
         help="Optional .npy/.pickle with off-graph text vectors for the F4 stage",
+    )
+    parser.add_argument(
+        "--shadow-sentences", type=str, default=None,
+        help="Optional .npy [S, D] of real sentence vectors (Słowosieć usage "
+             "examples) for the sentence-level F4 supervision",
+    )
+    parser.add_argument(
+        "--shadow-sentence-lus", type=str, default=None,
+        help=".npy [S] int64 of the LU (node id) each shadow sentence "
+             "illustrates; required with --shadow-sentences",
+    )
+    parser.add_argument(
+        "--shadow-sent-weight", type=float, default=0.0,
+        help="weight of L_shadow_sent: transport of a real edge taught on the "
+             "sentences its endpoints own (0 = off)",
+    )
+    parser.add_argument(
+        "--shadow-sent-batch", type=int, default=256,
+        help="sentence pairs drawn per step for L_shadow_sent",
+    )
+    parser.add_argument(
+        "--shadow-sent-temperature", type=float, default=0.0,
+        help="softmax temperature of L_shadow_sent; 0 = measure it from the "
+             "sentence corpus spread",
     )
 
     # operator / architecture
@@ -329,6 +354,8 @@ def main() -> None:
     )
     base_dim = int(next(iter(node2emb.values())).numel())
     shadow = load_shadow_vectors(args.shadow_vectors, dim=base_dim)
+    shadow_sents, shadow_sent_lus = load_shadow_sentences(
+        args.shadow_sentences, args.shadow_sentence_lus, dim=base_dim)
 
     cfg = WiazkaConfig(
         op_dim=args.op_dim,
@@ -389,13 +416,21 @@ def main() -> None:
         num_shadow=args.num_shadow,
         shadow_jitter=args.shadow_jitter,
         shadow_batch=args.shadow_batch,
+        shadow_sent_weight=args.shadow_sent_weight,
+        shadow_sent_batch=args.shadow_sent_batch,
+        shadow_sent_temperature=args.shadow_sent_temperature,
         lr_scheduler=args.lr_scheduler,
         warmup_ratio=args.warmup_ratio,
     )
     print(f"[wiazka] config: {dataclasses.asdict(cfg)}")
 
     cfg.save_dir = args.save_dir
-    trainer = WiazkaTrainer(node2emb, rel2idx, edges, cfg, shadow_vectors=shadow)
+    trainer = WiazkaTrainer(
+        node2emb, rel2idx, edges, cfg,
+        shadow_vectors=shadow,
+        shadow_sentences=shadow_sents,
+        shadow_sentence_lus=shadow_sent_lus,
+    )
     trainer.train(epochs=cfg.epochs, log_every=args.log_every_n_steps)
 
     idx2rel = {v: k for k, v in rel2idx.items()}

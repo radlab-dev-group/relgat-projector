@@ -77,3 +77,49 @@ def load_shadow_vectors(path: str, dim: int) -> Optional[np.ndarray]:
         )
     print(f"[data]   shadow vectors: {vec.shape[0]}")
     return vec
+
+
+def load_shadow_sentences(path: str, lu_ids_path: str, dim: int):
+    """Sentence corpus for the sentence-level F4 supervision.
+
+    ``path`` is a ``.npy`` ``[S, D]`` array (or a ``.pickle`` dict) of *text*
+    vectors -- the Słowosieć usage examples, embedded with the same embedder
+    as the nodes.  ``lu_ids_path`` is a ``.npy`` ``[S]`` int64 array naming, for
+    every sentence, the LU (graph node) it illustrates; the two files are rows
+    of the same corpus, produced together by
+    ``relgat_projector_apps.diagnostics.build_shadow_sentence_corpus``.
+
+    Returns ``(vectors [S, D] float32, lu_ids [S] int64)`` or ``(None, None)``
+    when no path is given.
+    """
+    if not path:
+        return None, None
+    if not lu_ids_path:
+        raise ValueError(
+            "--shadow-sentences needs --shadow-sentence-lus: a sentence corpus "
+            "without the LU it belongs to cannot supervise a relation")
+    print(f"[data] loading shadow sentences: {path}")
+    if path.endswith(".npy"):
+        vec = np.load(path)
+    elif path.endswith((".pickle", ".pkl")):
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        if isinstance(data, dict):
+            vec = np.stack([np.asarray(v, dtype=np.float32) for v in data.values()])
+        else:
+            vec = np.asarray(data, dtype=np.float32)
+    else:
+        raise ValueError(f"unsupported shadow sentence format: {path}")
+    vec = np.ascontiguousarray(vec, dtype=np.float32)
+    if vec.ndim == 1:
+        vec = vec.reshape(1, -1)
+    if vec.shape[1] != dim:
+        raise ValueError(f"shadow sentences have dim {vec.shape[1]}, expected {dim}")
+    lus = np.load(lu_ids_path)
+    lus = np.ascontiguousarray(lus, dtype=np.int64).reshape(-1)
+    if len(lus) != vec.shape[0]:
+        raise ValueError(
+            f"{len(lus)} LU ids for {vec.shape[0]} sentence vectors: "
+            f"{lu_ids_path} and {path} are not the same corpus")
+    print(f"[data]   shadow sentences: {vec.shape[0]}")
+    return vec, lus
