@@ -130,6 +130,32 @@ za darmo dla 200 zdań). Jeśli nasza augmentacja daje **węższy** rozkład (mn
 wariancję) przy porównywalnym średnim przesunięciu — teza o niepsuciu geometrii
 jest udowodniona za jeden dzień pracy.
 
+## 7b. Pomiar na operatorze (sekcja 03, 2026-10-30)
+
+Pomysł ma swoją sekcję w `operator_report`
+(`relgat_projector/core/diagnostics/augmentation.py`). Uruchomienie:
+`python -m relgat_projector_apps.diagnostics.operator_report --ckpt
+wiazka-models/S14_20261029_210326/best --section 03`. Mierzone na 4096
+wektorach węzłów tego samego checkpointu, bez adnotacji — gold jest
+analityczny (`ISOT = 0`, `cos(v, T(0)v) = 1`).
+
+| twierdzenie z §2 | zmierzone | werdykt |
+|---|---|---|
+| izometria do skali: `cos(T u, T v) = cos(u, v)` | `ISOT` = **0.000216** (syn), **0.000183** (ant) | spełnione, błąd 2·10⁻⁴ to dokładność numeryczna, nie deformacja |
+| dial `λ` jest ciągły i monotoniczny | `cos(v, T_syn(λ)v)`: 1.000 / 0.976 / 0.927 / 0.875 / **0.823** dla λ = 0…1 | spełnione; `λ` realnie steruje siłą augmentacji |
+| `T_ant(v)` jest trudnym negatywem | dystans do siebie **0.289** wobec **0.999** dla wektora losowego | spełnione: blisko tematu, daleko znaczenia |
+| `C_rs` generuje trudne negatywy bez etykiet | separacja porządków rodziny `C_rs` **0.301** vs rodzina losowa **0.145** → **lift +0.156** | spełnione, i to z kontrolą z §4: losowa rodzina o tej samej liczebności daje dwukrotnie mniej |
+
+Czyli §2 stoi w całości na liczbach, a nie na intuicji — w szczególności
+ostatni wiersz to test, którego sam dokument się domagał (§4 „test
+kontrolny"): gdyby losowa rodzina separowała tak samo, augmentacja nie
+zawdzięczałaby niczego ontologii. Zawdzięcza.
+
+Czego pomiar **nie** stwierdza: że augmentacja wygra z tłumaczeniem
+wstecznym na zadaniu retrieval (§4, wiersz 1). Do tego potrzebny jest
+trening embedera na parach z operatora — czyli faza 3b, której jeszcze nie
+było. To, co powyżej, dowodzi własności narzędzia, nie jego przewagi.
+
 ## 8. Punkty odniesienia
 
 - SemDeDup (2023) — ten sam kontekst, inne podejście (usuwanie zamiast

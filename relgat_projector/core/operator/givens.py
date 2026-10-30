@@ -495,6 +495,7 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
         x: torch.Tensor,
         rel_ids: torch.Tensor,
         base_point: torch.Tensor | None = None,
+        lambdas: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Exact inverse ``exp(-Omega_r) / s_r`` of the transform used forward.
 
@@ -505,17 +506,42 @@ class GivensRelationOperator(nn.Module, RelationalOperator):
         the chart origin).  Ignoring the modulation would turn every cycle loss
         into a measure of "how much context is there" and train the connection
         away.
+
+        ``lambdas`` inverts the *dial-scaled* transform ``apply(x, r, lambdas)``,
+        which is what a reversible scheme has to undo: the key of the
+        pseudonymisation idea (docs/IDEAS/06) is ``T_r(lambda)`` at the published
+        ``lambda``, and an inverse hardcoded to ``lambda = 1`` would not be a key
+        at all.  ``None`` keeps the previous full-step behaviour.
         """
         B = x.shape[0]
         rel_ids = self._broadcast_rel(rel_ids, B)
+        uniform = self._is_uniform_lambda(lambdas)
         context = self.use_context and self.ctx_W is not None
+
+        # The dial scales the rotation *and* the scale exponent exactly as
+        # ``apply`` does, so the inverse of ``apply(x, r, lam)`` is the same
+        # lam with both negated -- the contract a reversible scheme needs:
+        # docs/IDEAS/06 publishes ``T_r(lam) v`` and the key has to undo it.
         if not context or base_point is None:
-            return self._apply_grouped(x, rel_ids, sign=-1.0, lam=1.0)
+            if uniform:
+                return self._apply_grouped(
+                    x, rel_ids, sign=-1.0,
+                    lam=1.0 if lambdas is None
+                    else float(lambdas.reshape(-1)[0].item()))
+            theta = -self.theta[rel_ids] * lambdas.unsqueeze(-1)
+            log_scale = None
+            if self.use_scale:
+                log_scale = -self.log_scale[rel_ids] * lambdas
+            return self._apply_dense_rows(x, theta, log_scale)
 
         theta = self.theta[rel_ids] + self.eps_tensor() * self.ctx_P(
             torch.relu(self.ctx_W(base_point))
         )
         log_scale = -self.log_scale[rel_ids] if self.use_scale else None
+        if lambdas is not None:
+            theta = theta * lambdas.unsqueeze(-1)
+            if log_scale is not None:
+                log_scale = log_scale * lambdas
         return self._apply_dense_rows(x, -theta, log_scale)
 
     # ------------------------------------------------------------------ chain

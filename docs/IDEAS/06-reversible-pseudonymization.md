@@ -161,6 +161,53 @@ Trzy dni, jeden skrypt: atak invertujący na `V` (bez ochrony) i na
 `T_hyper(λ=0.8)V`. Jeśli BLEU spada z np. 0.45 do < 0.15 **przy ΔMRR ≤ 2 pkt**,
 jest co badać. Jeśli nie spada wcale — kierunek jest martwy i szkoda tygodnia.
 
+## 7b. Pomiar na operatorze (sekcja 06, 2026-10-30)
+
+Sekcja **06** w `operator_report`
+(`relgat_projector/core/diagnostics/pseudonymization.py`). Uruchomienie:
+`python -m relgat_projector_apps.diagnostics.operator_report --ckpt
+wiazka-models/S14_20261029_210326/best --section 06`. Prywatność mierzona
+atakiem linkage (model zagrożeń z §3: atakujący zna korpusem i architekturę,
+nie zna `theta_r`); brak w tej chwili dekodera invertującego, więc BLEU z §4
+nie jest jeszcze liczbowo dostępne.
+
+Promień anonimowości liczony z kwantyla rozkładu kosinusów korpusem
+(`epsilon = 0.0258` dla 1%), **nie** jako stała: w przestrzeni o średnim
+cosinie par ~0.95 sztywne `epsilon = 0.05` wrzuca do kuli 1963 z 2048
+wektorów i metryka przestaje cokolwiek znaczyć.
+
+| ramię (krok `synonimia`, λ = 1) | AUC ataku linkage | MRR (użyteczność) | `cce` (klucz) |
+|---|---|---|---|
+| klucz semantyczny `T_r(λ)` | **0.955** | **0.990** | **4.3·10⁻⁷** |
+| losowa rotacja z kluczem | 0.088 | 0.100 | — |
+| szum gaussowski (dopasowany krok) | 0.578 | 0.113 | — |
+
+Trzy wnioski, wszystkie niezgodne z tezą lub ją zawężające:
+
+1. **Klucz działa dokładnie** — `cce = 4·10⁻⁷` dla każdego `λ`. To jest
+   część twierdząca pomysłu i jako jedyna przechodzi bez zastrzeżeń.
+   Wymusiła ona zresztą poprawkę w kodzie: `inverse()` odwracał wyłącznie
+   pełny krok, więc opublikowanie `T_r(λ) v` nie miało w ogóle klucza.
+2. **Prywatności nie ma wcale.** `T_r(λ)` zachowuje użyteczność (MRR 0.990)
+   i w zamian zachowuje tożsamość: AUC ataku spada z 0.990 do 0.955 na
+   całym zakresie `λ`. Ramiona, które atak psują (rotacja 0.088, szum 0.578),
+   psują też wyszukiwanie (MRR 0.100 i 0.113). **Krzywa prywatność–
+   użyteczność nie istnieje — jest pionowa.** To dokładnie napięcie z §6,
+   wpisane tam jako ryzyko „wysokie”: izometria chroni użyteczność dokładnie
+   tak samo dobrze, jak chroni tożsamość, bo dla `cos` te dwie rzeczy to ta
+   sama wielkość.
+3. **Warunek 1 z §2 jest więc spełniony, a warunek 2 nie**: `hyper` miał
+   wnosić prywatność przez uogólnienie, ale `T_r` realizuje obrót, nie
+   przejście po hierarchii — orbita encji pozostaje jednoelementowa w sensie
+   kosinusowym (`k`-anon śr. 0 przy `epsilon` mierzonym).
+
+**Co to oznacza dla pomysłu:** jako schemat prywatności jest do odrzucenia
+w obecnym kształcie, i §6 miało rację, prosząc o ten test w pierwszym
+tygodniu. Wartość, która zostaje, jest inna i mniejsza: *dokładnie
+odwracalna, izometryczna transformacja wektorów* nadaje się do
+współdzielenia indeksu między instytucjami z kluczem (synchronizacja bez
+ujawniania `theta_r`), tylko nie do anonimizacji.
+
 ## 8. Punkty odniesienia
 
 - Wszystkie cztery prace o inwersji embeddingów (2023, 2024, 2026, 2026) —

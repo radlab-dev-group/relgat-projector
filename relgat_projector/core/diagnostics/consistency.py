@@ -76,11 +76,17 @@ def roc_auc(labels: Sequence[float], scores: Sequence[float]) -> float:
     ranks[order] = np.arange(1.0, len(scores) + 1.0)
     sorted_scores = scores[order]
     i = 0
-    while i < len(sorted_scores):          # average the ranks of ties
+    # Average the ranks of ties -- in the *sorted* positions, mapped back to
+    # the rows they came from. Writing them to ``ranks[i:j+1]`` instead (as
+    # this did) overwrites the ranks of unrelated rows: with a perfect
+    # separation of 60 origins and 480 impostors it printed 0.9988 instead of
+    # 1.0, and every tied block of float32 cosines shifts an AUC by an
+    # amount of the same order as the lifts this repository reports.
+    while i < len(sorted_scores):
         j = i
         while j + 1 < len(sorted_scores) and sorted_scores[j + 1] == sorted_scores[i]:
             j += 1
-        ranks[i : j + 1] = ranks[i : j + 1].mean()
+        ranks[order[i : j + 1]] = (i + j) / 2.0 + 1.0
         i = j + 1
     rank_sum = ranks[labels > 0.5].sum()
     return float((rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
@@ -120,6 +126,22 @@ class Transport:
 
     def apply(self, x: torch.Tensor, rel: str) -> torch.Tensor:
         raise NotImplementedError
+
+    def apply_at(self, x: torch.Tensor, rel: str,
+                 lambdas: float) -> torch.Tensor:
+        """``T_r`` at a fraction of its step -- the dial of ideas 03 and 06.
+
+        On the served path (the transport modulated where it is applied, as
+        in production), unlike :meth:`CheckpointTransport.apply_dial`, which
+        is the *keyed* path an invertible scheme needs.  A transport without
+        a dial raises rather than silently ignoring the parameter: an ignored
+        dial would report the full step at every ``lambda`` and the curve
+        would look flat and plausible.
+        """
+        if float(lambdas) == 1.0:
+            return self.apply(x, rel)
+        raise NotImplementedError(
+            f"{type(self).__name__} has no dial")
 
     def apply_chain(self, x: torch.Tensor, chain: Sequence[str]) -> torch.Tensor:
         for rel in chain:
@@ -191,8 +213,21 @@ class AdditiveTransport(Transport):
         # baseline" would not mean separation *zero* but separation *small*.
         return x + sign * self.strength * self._v[rel].to(x.device, dtype=x.dtype)
 
-    def apply(self, x: torch.Tensor, rel: str) -> torch.Tensor:
-        return self._step(x, rel, +1.0)
+    def apply(self, x: torch.Tensor, rel: str,
+              lambdas: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # the dial of a translation is a fraction of its step: the baseline
+        # has to answer to the same lambda the learned operator is dialed at,
+        # otherwise "baseline at lambda" would not be the same experiment
+        if lambdas is None:
+            return self._step(x, rel, +1.0)
+        lam = lambdas.to(x.device, dtype=x.dtype).reshape(-1, 1)
+        return x + lam * self.strength * self._v[rel].to(x.device, dtype=x.dtype)
+
+    def apply_at(self, x: torch.Tensor, rel: str,
+                 lambdas: float) -> torch.Tensor:
+        return self.apply(x, rel,
+                          torch.full((x.shape[0],), float(lambdas),
+                                     device=x.device, dtype=x.dtype))
 
     def inverse(self, x: torch.Tensor, rel: str) -> torch.Tensor:
         return self._step(x, rel, -1.0)
@@ -226,6 +261,71 @@ class CheckpointTransport(Transport):
     def apply(self, x: torch.Tensor, rel: str) -> torch.Tensor:
         return self.model.apply(
             x, torch.tensor([self.rel2idx[rel]], device=x.device))
+
+    def apply_dial(self, x: torch.Tensor, rel: str,
+                   lambdas: torch.Tensor) -> torch.Tensor:
+        """``T_r(lambda)`` -- the same transport at a fraction of its step.
+
+        Separate from :meth:`apply` because the dial is only ever asked for by
+        the ideas that publish or augment with the operator (03, 06); the
+        consistency metrics stay on the served path.
+
+        The connection is switched off for this call and that is the point:
+        with a base-point-dependent transport ``T_r`` is not one matrix, so
+        ``theta_r`` alone is *not* a key -- inverting would need the point the
+        vector was transported from, which is the secret the scheme is trying
+        to hide.  The unmodulated transport is a fixed similarity per relation,
+        exactly invertible from the key alone, and that is what idea 06
+        publishes.  The gap between the two is measured and reported, not
+        assumed away (see ``modulation_gap``).
+        """
+        op = self.model.operator
+        ids = torch.full((x.shape[0],), self.rel2idx[rel],
+                         device=x.device, dtype=torch.long)
+        was_on = op.use_context
+        op.use_context = False
+        try:
+            return self.model.apply(x, ids,
+                                    lambdas=lambdas.to(x.device, dtype=x.dtype))
+        finally:
+            op.use_context = was_on
+
+    def apply_at(self, x: torch.Tensor, rel: str,
+                 lambdas: float) -> torch.Tensor:
+        """The dial on the served (context-modulated) path.
+
+        Idea 03 augments with what production actually does, so it must turn
+        the same knob the serving code turns; only idea 06, which needs the
+        transform to be invertible from the key alone, uses
+        :meth:`apply_dial` instead.
+        """
+        return self.model.apply(
+            x, torch.full((x.shape[0],), self.rel2idx[rel],
+                          device=x.device, dtype=torch.long),
+            lambdas=torch.full((x.shape[0],), float(lambdas),
+                               device=x.device, dtype=x.dtype))
+
+    def inverse_dial(self, x: torch.Tensor, rel: str,
+                     lambdas: torch.Tensor) -> torch.Tensor:
+        """The exact inverse of :meth:`apply_dial` at the same ``lambda``."""
+        # ``base_point=None`` is already the unmodulated inverse, which is the
+        # same map :meth:`apply_dial` published
+        return self.model.operator.inverse(
+            x,
+            torch.full((x.shape[0],), self.rel2idx[rel],
+                       device=x.device, dtype=torch.long),
+            base_point=None, lambdas=lambdas.to(x.device, dtype=x.dtype))
+
+    def modulation_gap(self, x: torch.Tensor, rel: str) -> float:
+        """How much the connection's context moves ``T_r`` away from its key.
+
+        The quantity that decides whether reversible pseudonymisation is
+        possible at all with a learned connection: 0 means the operator is a
+        fixed matrix per relation and the key closes it exactly.
+        """
+        served = _unit(self.apply(x, rel))
+        keyed = _unit(self.apply_dial(x, rel, torch.ones(x.shape[0], device=x.device)))
+        return float((1.0 - (served * keyed).sum(dim=-1)).mean())
 
     @torch.no_grad()
     def inverse(self, x: torch.Tensor, rel: str) -> torch.Tensor:

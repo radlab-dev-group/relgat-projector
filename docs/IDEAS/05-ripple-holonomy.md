@@ -161,6 +161,49 @@ Jeśli rozkłady `ΔHD` dla edycji i dla edycji zerowych się nie rozdzielają �
 sprawdzian jest bezwartościowy i nie warto inwestować dalej. Całość: jeden
 dzień, w tym pół dnia na odpalenie modelu.
 
+## 8b. Pomiar na operatorze (sekcja 05, 2026-10-30)
+
+Sekcja **05** w `operator_report`
+(`relgat_projector/core/diagnostics/ripple.py`). Uruchomienie:
+`python -m relgat_projector_apps.diagnostics.operator_report --ckpt
+wiazka-models/S14_20261029_210326/best --section 05 --edits 12`.
+
+**Bramę z §6 zmierzono pierwszą**: pętli (dwóch różnych relacji incydentnych
+do encji) nie ma tylko dla 53,5% encji — **pokrycie 46,5%** (1906 z 4096
+zpróbkowanych encji, mediana 1 pary). Jest więc gęściej niż próg ~30%, o
+którym §6 każe się bać; sondu jest na czym oprzeć.
+
+**Redakcja pojęciowa, ważniejsza niż liczby.** Pierwsza wersja sondy
+edytowała *krawędź grafu* i mierzyła `ΔHD` w otoczeniu. To tautologia:
+transport w `x` jest funkcją `x`, więc zmiana współczynnika relacji nie
+może „dotknąć jednego sąsiedztwa” — zmieniłaby wszystkie tak samo, a AUC
+mówiłaby tylko, co właśnie wstrzyknęliśmy. Ta sama pułapka, która w tym
+repo kosztowała już jeden etap (`L_shadow_cycle`). Sonda mierzy więc edycję
+**samego połączenia**: `P' = P + v·h_eᵀ` z `h_e = relu(W x_e)` — rank-one
+zmiana wag liczących transport, celowana w encję, bez ruszania żadnego
+wektora węzła. Lokalczość jest wtedy *założeniem edycji*, a pomiar pyta,
+czy ona obowiązuje.
+
+| wielkość | wartość | interpretacja |
+|---|---|---|
+| `ΔHD` bliżej (encja + sąsiedzi) | −0.000925 | |
+| `ΔHD` dalej (encje losowe) | −0.000729 | |
+| **koncentracja AUC** | **0.572** | próg go/no-go z §4 to > 0.75 |
+| AUC edycji zerowej (ta sama procedura, `magnitude = 0`) | **0.500** | |
+| `ΔHD` edycji zerowej | **0.000000** | |
+
+Podłoga procedury jest idealna (zero, AUC 0.5), więc wynik 0.572 nie jest
+szumem — jest **realnym, ale zbyt słabym** sygnałem: zmiana połączenia
+celowana w jedną encję propaguje na cały wykres niemal jednostajnie.
+
+**Werdykt: na tej architekturze sonda z §5 nie przechodzi go/no-go.** I
+wiadomo dlaczego, bez zgadywania: `eps = 0.165`, a modulacja kontekstem
+przesuwa `T_r` o `6.3·10⁻⁴` (`modulation_gap`) — połączenie jest w tym
+checkpoincie formalnie obecne, ale praktycznie płaskie. `ΔHD` nie ma czego
+lokalizować, bo krzywizny prawie nie ma. Warunek §6 „przestrzeń nie jest
+zgodna z przestrzenią operatora” nie zawiódł; zawiódł warunek „`ΔHD`
+reaguje na wiedzę, nie na szum” — z przeciwnego powodu.
+
 ## 9. Punkty odniesienia
 
 - *Why Does New Knowledge Create Messy Ripple Effects in LLMs?* (2024).

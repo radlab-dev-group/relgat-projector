@@ -134,6 +134,50 @@ seedem treningowym. Jeśli odcisk rozdzieli „inny embeder" od „inny seed"
 (AUC > 0.9), pomysł działa; jeśli nie, odcisk mierzy szum, nie semantykę.
 Pół dnia roboty.
 
+## 7b. Pomiar na operatorze (sekcja 07, 2026-10-30)
+
+Sekcja **07** w `operator_report`
+(`relgat_projector/core/diagnostics/fingerprint.py`). Uruchomienie:
+`python -m relgat_projector_apps.diagnostics.operator_report --ckpt
+wiazka-models/S14_20261029_210326/best --baseline
+wiazka-models/S13_20261029_162050/best --section 07`.
+
+Najpierw dwie własności, bez których brama nie ma sensu:
+
+* **samodyf = dokładnie `0.0`** — odcisk jest wyznaczalny powtarzalnie;
+* **kąt średni między relacjami 0.346 rad**, `D_Θ` liczona na macierzach
+  obrotu, więc niezmiennicza względem zmiany bazy `B` — sprawdzonym
+  testem (`test_theta_angle_matrix_is_invariant_to_a_change_of_basis`),
+  bo na tym niezmienniku stoi cała warstwa 1.
+
+| wstrzyknięta regresja | `Δ D_Θ` |
+|---|---|
+| `theta` × 1.01 | 0.1047 |
+| `theta` × 1.05 | 0.5190 |
+| `theta` × 1.20 | 2.0151 |
+| kwantyzacja fp16 | **0.0007** |
+| inny przebieg tego samego przepisu (S13 → S14) | **0.7980** (`d_C` = 3.3779) |
+
+Odcisk jest **monotoniczny względem wielkości zmiany** i **głuchy na
+fp16** (0.0007, czyli ~150× poniżej nawet 1% drgania) — dokładnie takie
+zachowanie chce się w CI: zmiana kwantyzacji nie alarmuje, zmiana algebry
+relacji alarmuje. Między tymi dwoma poziomami mieści się też realna różnica
+dwóch przebiegów (0.798 = 5,7% średniego kąta), więc próg da się ustawić
+powyżej szumu przebiegu i poniżej regresji.
+
+Warstwa 3 (trafność dekodera per relacja) wymaga uczciwej etykiety: probe
+to **krawędzie treningowe** checkpointu, macro **0.981** — dla odcisku to
+właściwy wybór (ma być własnością *tego* modelu, nie błędem generalizacji),
+ale nie wolno go czytać jako 0.476 z `report.json` treningowego. S13 → S14:
+** ani jedna relacja nie pogorszyła się** o więcej niż 0.05, mimo `d_C` = 3.38.
+"`C_rs` się przesunęło, a zachowanie nie” — to rozróżnienie jest dokładnie
+tym, co §3 obiecuje inżynierowi.
+
+Czego nie zmierzono: AUC wykrycia per typ regresji z §4 (potrzeba ≥2
+przestrzeni z *różnymi embederami*) ani porównania z MMD/PSI przy
+wyrównanym FAF. Do tego potrzeba drugiego embedera — jedna z dwóch rzeczy,
+których temu pomysłowi najbardziej brakuje.
+
 ## 8. Punkty odniesienia
 
 - *Verification of Machine Unlearning is Fragile* (2024) i *Towards Reliable

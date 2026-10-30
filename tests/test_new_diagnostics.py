@@ -21,6 +21,7 @@ from relgat_projector.core.diagnostics import (
     identity_error,
     orbit_entropy,
     orbit_labels,
+    roc_auc,
     synthesize,
     threshold_entropy,
     typed_dedup,
@@ -152,3 +153,39 @@ def test_synthesize_respects_an_active_constraint():
     # direction in the reduced space, which is what the closed form promises
     assert float(sol["v"].norm()) == pytest.approx(1.0, abs=1e-5)
     assert float((sol["v"] * sol["b_rot"]).sum()) < 1e-5
+
+
+def test_roc_auc_matches_mann_whitney_under_heavy_ties():
+    """Ties used to be written back to the wrong rows of the rank vector.
+
+    The old code averaged a tied block into ``ranks[i:j+1]`` -- positions in
+    the *sorted* order used as if they indexed the input -- so a tie group
+    overwrote the ranks of unrelated rows. Perfect separation of 60 origins
+    against 480 impostors printed 0.9988 instead of 1.0, an error of the same
+    size as the lifts every AUC in this repository reports.
+    """
+    rng = np.random.default_rng(0)
+
+    def brute(labels, scores):
+        labels = np.asarray(labels, float)
+        scores = np.asarray(scores, float)
+        pos, neg = scores[labels > 0.5], scores[labels < 0.5]
+        wins = int((pos[:, None] > neg[None, :]).sum())
+        wins += 0.5 * int((pos[:, None] == neg[None, :]).sum())
+        return wins / (len(pos) * len(neg))
+
+    worst = 0.0
+    for _ in range(60):
+        n = int(rng.integers(12, 60))
+        # integers only: every score is tied with several others by design
+        scores = rng.integers(0, 5, n).astype(float)
+        labels = (rng.random(n) > 0.5).astype(float)
+        if 0 < labels.sum() < n:
+            worst = max(worst, abs(roc_auc(labels, scores)
+                                   - brute(labels, scores)))
+    assert worst == 0.0, f"roc_auc drifts from Mann-Whitney by {worst:.2e}"
+
+
+def test_roc_auc_of_a_perfect_separation_with_ties_is_one():
+    assert roc_auc([1, 1, 1, 0, 0, 0], [1.0, 1.0, 1.0, 0.2, 0.1, 0.0]) == 1.0
+    assert roc_auc([1, 1, 0, 0], [0.5, 0.5, 0.5, 0.5]) == 0.5

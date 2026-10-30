@@ -59,6 +59,37 @@ from .consistency import (
     roc_auc,
     spearman,
 )
+from .augmentation import (
+    augmentation_report,
+    dial_curve,
+    hard_negative_separation,
+    isometry_error,
+)
+from .fingerprint import (
+    applicability_profile,
+    detection_auc,
+    fingerprint,
+    fingerprint_delta,
+    probe_accuracy_per_relation,
+    theta_angle_matrix,
+)
+from .pseudonymization import (
+    cce,
+    k_anonymity,
+    linkage_auc,
+    protection_grid,
+    retrieval_mrr,
+)
+from .ripple import (
+    adjacency,
+    connection_edit,
+    concentration_auc,
+    coverage,
+    incident_relations,
+    local_hd,
+    loop_pairs,
+    measure_ripple,
+)
 
 __all__ = [
     "AdditiveTransport",
@@ -112,4 +143,27 @@ __all__ = [
     "threshold_entropy",
     "typed_dedup",
     "verbose_vs_conflict",
+    "applicability_profile",
+    "adjacency",
+    "augmentation_report",
+    "cce",
+    "connection_edit",
+    "concentration_auc",
+    "coverage",
+    "detection_auc",
+    "dial_curve",
+    "fingerprint",
+    "fingerprint_delta",
+    "hard_negative_separation",
+    "incident_relations",
+    "isometry_error",
+    "k_anonymity",
+    "linkage_auc",
+    "local_hd",
+    "loop_pairs",
+    "measure_ripple",
+    "probe_accuracy_per_relation",
+    "protection_grid",
+    "retrieval_mrr",
+    "theta_angle_matrix",
 ]
